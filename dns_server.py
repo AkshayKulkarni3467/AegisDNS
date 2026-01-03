@@ -1,19 +1,20 @@
-# dns_server.py
 import socket
 import json
 import os
 import re
+import sqlite3
+import time
 from dnslib import DNSRecord, DNSHeader, RCODE, QTYPE
 import dns.resolver
 from dns_utils import log_request, load_dns_blocklist, load_ip_blocklist
 from dns_model import load_model, predict_domain
 from ip_model import IPFilterSystem
-import time
 
 DNS_BLOCKLIST_FILE = "manual_lists/domain_blocklist.txt"
 IP_BLOCKLIST_FILE = "manual_lists/ip_blocklist.txt"
 WHITELIST_FILE = "manual_lists/domain_whitelist.txt"
 FILTER_CONFIG_PATH = "filter_config.json"
+DNS_CACHE_DB = "dns_cache.db"
 
 # Major legitimate domains whitelist
 LEGITIMATE_DOMAINS_WHITELIST = {
@@ -47,8 +48,136 @@ filter_config = None
 manual_whitelist = set()
 
 resolver = dns.resolver.Resolver()
-dns_cache = {}
 ip_filter = IPFilterSystem()
+
+
+class DNSCache:
+    """SQLite-based DNS cache with automatic expiration"""
+    
+    def __init__(self, db_path=DNS_CACHE_DB):
+        self.db_path = db_path
+        self.conn = None
+        self._init_db()
+    
+    def _init_db(self):
+        """Initialize the database and create tables if they don't exist"""
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS dns_cache (
+                domain TEXT PRIMARY KEY,
+                dns_record BLOB NOT NULL,
+                cached_time REAL NOT NULL,
+                ttl INTEGER NOT NULL,
+                expires_at REAL NOT NULL
+            )
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_expires_at 
+            ON dns_cache(expires_at)
+        ''')
+        self.conn.commit()
+        
+        # Clean up expired entries on initialization
+        self._cleanup_expired()
+    
+    def _cleanup_expired(self):
+        """Remove expired cache entries"""
+        current_time = time.time()
+        self.conn.execute(
+            'DELETE FROM dns_cache WHERE expires_at < ?',
+            (current_time,)
+        )
+        self.conn.commit()
+    
+    def get(self, domain):
+        """
+        Retrieve a cached DNS record if it exists and hasn't expired.
+        Returns: (cached_time, dns_record) or None if not found/expired
+        """
+        current_time = time.time()
+        
+        cursor = self.conn.execute(
+            'SELECT dns_record, cached_time, expires_at FROM dns_cache WHERE domain = ?',
+            (domain,)
+        )
+        row = cursor.fetchone()
+        
+        if row is None:
+            return None
+        
+        dns_record_bytes, cached_time, expires_at = row
+        
+        # Check if expired
+        if current_time >= expires_at:
+            self.delete(domain)
+            return None
+        
+        # Deserialize the DNS record
+        try:
+            dns_record = DNSRecord.parse(dns_record_bytes)
+            return (cached_time, dns_record)
+        except Exception:
+            # If deserialization fails, delete the corrupted entry
+            self.delete(domain)
+            return None
+    
+    def set(self, domain, dns_record, ttl):
+        """
+        Store a DNS record in the cache.
+        
+        Args:
+            domain: Domain name
+            dns_record: DNSRecord object
+            ttl: Time-to-live in seconds
+        """
+        cached_time = time.time()
+        expires_at = cached_time + ttl
+        
+        # Serialize the DNS record
+        dns_record_bytes = dns_record.pack()
+        
+        self.conn.execute('''
+            INSERT OR REPLACE INTO dns_cache (domain, dns_record, cached_time, ttl, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (domain, dns_record_bytes, cached_time, ttl, expires_at))
+        self.conn.commit()
+    
+    def delete(self, domain):
+        """Delete a specific domain from the cache"""
+        self.conn.execute('DELETE FROM dns_cache WHERE domain = ?', (domain,))
+        self.conn.commit()
+    
+    def clear_all(self):
+        """Clear all cache entries"""
+        self.conn.execute('DELETE FROM dns_cache')
+        self.conn.commit()
+    
+    def get_stats(self):
+        """Get cache statistics"""
+        cursor = self.conn.execute('SELECT COUNT(*) FROM dns_cache')
+        total = cursor.fetchone()[0]
+        
+        current_time = time.time()
+        cursor = self.conn.execute(
+            'SELECT COUNT(*) FROM dns_cache WHERE expires_at < ?',
+            (current_time,)
+        )
+        expired = cursor.fetchone()[0]
+        
+        return {
+            'total_entries': total,
+            'expired_entries': expired,
+            'valid_entries': total - expired
+        }
+    
+    def close(self):
+        """Close the database connection"""
+        if self.conn:
+            self.conn.close()
+
+
+# Initialize the cache
+dns_cache = DNSCache()
 
 
 def load_filter_config():
@@ -302,22 +431,19 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
     ip_blocklist = load_ip_blocklist(IP_BLOCKLIST_FILE)
 
     if not is_quarantine_check:
-        if qname in dns_cache:
-            cached_time, cached_record = dns_cache[qname]
-            min_ttl = min([r.ttl for r in cached_record.rr]) if cached_record.rr else 0
-            
-            if (time.time() - cached_time) < min_ttl:
-                action = "CACHED"
-                reply = cached_record
-                reply.header.id = request.header.id
-                log_request(client_ip, client_port, qname, action, log_func) 
-                try:
-                    sock.sendto(reply.pack(), addr)
-                except OSError as e:
-                    log_func(f"Failed to send cached response to {client_ip}:{client_port}: {e}")
-                return
-            else:
-                del dns_cache[qname]
+        # Try to get from SQLite cache
+        cached_result = dns_cache.get(qname)
+        if cached_result is not None:
+            cached_time, cached_record = cached_result
+            action = "CACHED"
+            reply = cached_record
+            reply.header.id = request.header.id
+            log_request(client_ip, client_port, qname, action, log_func) 
+            try:
+                sock.sendto(reply.pack(), addr)
+            except OSError as e:
+                log_func(f"Failed to send cached response to {client_ip}:{client_port}: {e}")
+            return
     
     # Use config-aware DNS action with all methods
     dns_a = dns_action_with_config(qname, model, feature_extractor, dns_blocklist, manual_whitelist, filter_config)
@@ -333,7 +459,21 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             quarantine_check_result = quarantine_check(reply)
             
                 
-            ip_a = ip_filter.ip_checker(response, ip_blocklist)
+            ip_a = ip_filter.ip_checker(
+                response, 
+                ip_blocklist,
+                ip_blocklist=ip_filter.ip_blocklist,
+                region_block=filter_config.get("ip_region_block", False),
+                regex_check=filter_config.get("ip_regex_check", True),
+                asn_block=filter_config.get("ip_asn_block", False),
+                rate_limit_check=filter_config.get("ip_rate_limit_check", False),
+                max_requests=filter_config.get("ip_max_requests", 100),
+                time_window=filter_config.get("ip_time_window", 60),
+                block_tor=filter_config.get("ip_block_tor", False),
+                block_vpn=filter_config.get("ip_block_vpn", False),
+                block_proxy=filter_config.get("ip_block_proxy", False),
+                block_datacenter=filter_config.get("ip_block_datacenter", False)
+            )
 
             
             if ip_a == "BLOCKED":
@@ -344,7 +484,10 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
                 wire_data = response.response.to_wire()
                 reply = DNSRecord.parse(wire_data)
                 reply.header.id = request.header.id
-                dns_cache[qname] = (time.time(), reply)
+                
+                # Calculate TTL and cache the response
+                min_ttl = min([r.ttl for r in reply.rr]) if reply.rr else 300  # Default 5 min
+                dns_cache.set(qname, reply, min_ttl)
                 
         except Exception as e:
             action = f"FAILED ({e})"
@@ -366,6 +509,10 @@ def start_dns_server(log_func, listen_ip="0.0.0.0", listen_port=6667, upstream_d
     enabled_methods = [k for k, v in filter_config.items() if isinstance(v, bool) and v]
     log_func(f"Filter configuration loaded: {len(enabled_methods)} methods enabled")
     log_func(f"ML Threshold: {filter_config.get('ml_threshold', 0.85):.2f}")
+    
+    # Log cache statistics
+    stats = dns_cache.get_stats()
+    log_func(f"DNS Cache initialized: {stats['valid_entries']} valid entries")
     
     LISTEN_IP = listen_ip 
     LISTEN_PORT = listen_port
@@ -391,18 +538,23 @@ def start_dns_server(log_func, listen_ip="0.0.0.0", listen_port=6667, upstream_d
     sock.bind((LISTEN_IP, LISTEN_PORT))
     log_func(f"DNS Filter running on {LISTEN_IP}:{LISTEN_PORT}")
     
-    while True:
-        try:
-            data, addr = sock.recvfrom(512)
-            handle_dns_query(data, addr, sock, log_func)
-        except socket.timeout:
-            continue
-        except OSError as e:
-            if hasattr(e, 'winerror') and e.winerror == 10054:
-                log_func(f"Connection reset by peer - continuing...")
-            else:
-                log_func(f"Socket error: {e}")
-            continue
-        except Exception as e:
-            log_func(f"Error handling packet: {e}")
-            continue
+    try:
+        while True:
+            try:
+                data, addr = sock.recvfrom(512)
+                handle_dns_query(data, addr, sock, log_func)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if hasattr(e, 'winerror') and e.winerror == 10054:
+                    log_func(f"Connection reset by peer - continuing...")
+                else:
+                    log_func(f"Socket error: {e}")
+                continue
+            except Exception as e:
+                log_func(f"Error handling packet: {e}")
+                continue
+    finally:
+        # Clean up on shutdown
+        dns_cache.close()
+        log_func("DNS server shutting down, cache closed")

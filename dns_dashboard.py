@@ -41,11 +41,11 @@ FILTER_CONFIG_PATH = "filter_config.json"
 
 # Default filter configuration
 default_filter_config = {
-    # Core methods
+    # DNS Core methods
     "use_whitelist": True,
     "use_manual_list": True,
     
-    # Heuristic methods
+    # DNS Heuristic methods
     "use_ip_check": True,
     "use_punycode_check": True,
     "use_excessive_hyphens": True,
@@ -54,12 +54,27 @@ default_filter_config = {
     "use_suspicious_tld": True,
     "use_dga_pattern": True,
     
-    # ML method
+    # DNS ML method
     "use_ml_model": True,
     
-    # Thresholds
+    # DNS Thresholds
     "ml_threshold": 0.85,
-    "suspicious_tld_threshold": 0.6
+    "suspicious_tld_threshold": 0.6,
+    
+    # IP Filter methods
+    "ip_use_blocklist": True,
+    "ip_region_block": False,
+    "ip_regex_check": True,
+    "ip_asn_block": False,
+    "ip_rate_limit_check": False,
+    "ip_block_tor": False,
+    "ip_block_vpn": False,
+    "ip_block_proxy": False,
+    "ip_block_datacenter": False,
+    
+    # IP Rate limiting
+    "ip_max_requests": 100,
+    "ip_time_window": 60
 }
 
 # UI Components that need global access
@@ -766,7 +781,7 @@ def main(page: ft.Page):
 
     # ==================== Tab 7: Settings ====================
     
-    # Filter method checkboxes - organized by category
+    # DNS Filter method checkboxes - organized by category
     
     # Core Methods
     use_whitelist_check = ft.Checkbox(
@@ -831,7 +846,7 @@ def main(page: ft.Page):
         tooltip="Use the trained machine learning model for classification"
     )
     
-    # Thresholds
+    # DNS Thresholds
     ml_threshold_slider = ft.Slider(
         min=0.0,
         max=1.0,
@@ -862,6 +877,78 @@ def main(page: ft.Page):
         color="grey"
     )
     
+    # IP Filter Methods
+    ip_use_blocklist = ft.Checkbox(
+        label="Use IP Blocklist",
+        value=filter_config.get("ip_use_blocklist", True),
+        tooltip="Check IPs against threat intelligence feeds"
+    )
+    
+    ip_region_block = ft.Checkbox(
+        label="Region Blocking",
+        value=filter_config.get("ip_region_block", False),
+        tooltip="Block IPs from specific countries"
+    )
+    
+    ip_regex_check = ft.Checkbox(
+        label="IP Pattern Check",
+        value=filter_config.get("ip_regex_check", True),
+        tooltip="Detect suspicious IP patterns"
+    )
+    
+    ip_asn_block = ft.Checkbox(
+        label="ASN Blocking",
+        value=filter_config.get("ip_asn_block", False),
+        tooltip="Block specific Autonomous System Numbers"
+    )
+    
+    ip_rate_limit_check = ft.Checkbox(
+        label="Rate Limiting",
+        value=filter_config.get("ip_rate_limit_check", False),
+        tooltip="Limit requests per IP address"
+    )
+    
+    ip_block_tor = ft.Checkbox(
+        label="Block Tor Exit Nodes",
+        value=filter_config.get("ip_block_tor", False),
+        tooltip="Block all Tor exit node IPs"
+    )
+    
+    ip_block_vpn = ft.Checkbox(
+        label="Block VPN IPs",
+        value=filter_config.get("ip_block_vpn", False),
+        tooltip="Block known VPN IP ranges"
+    )
+    
+    ip_block_proxy = ft.Checkbox(
+        label="Block Proxy Servers",
+        value=filter_config.get("ip_block_proxy", False),
+        tooltip="Block known proxy server IPs"
+    )
+    
+    ip_block_datacenter = ft.Checkbox(
+        label="Block Datacenter IPs",
+        value=filter_config.get("ip_block_datacenter", False),
+        tooltip="Block datacenter IP ranges (AWS, Azure, etc.)"
+    )
+    
+    # IP Rate Limit Parameters
+    ip_max_requests_input = ft.TextField(
+        label="Max Requests",
+        value=str(filter_config.get("ip_max_requests", 100)),
+        width=120,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="Maximum requests allowed per IP"
+    )
+    
+    ip_time_window_input = ft.TextField(
+        label="Time Window (sec)",
+        value=str(filter_config.get("ip_time_window", 60)),
+        width=120,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="Time window for rate limiting in seconds"
+    )
+    
     def on_ml_threshold_change(e):
         ml_threshold_text.value = f"ML Threshold: {e.control.value:.2f}"
         page.update()
@@ -877,169 +964,254 @@ def main(page: ft.Page):
     
     def save_settings(e):
         # Update config with all methods
-        new_config = {
-            # Core methods
-            "use_whitelist": use_whitelist_check.value,
-            "use_manual_list": use_manual_list_check.value,
+        try:
+            new_config = {
+                # DNS Core methods
+                "use_whitelist": use_whitelist_check.value,
+                "use_manual_list": use_manual_list_check.value,
+                
+                # DNS Heuristic methods
+                "use_ip_check": use_ip_check.value,
+                "use_punycode_check": use_punycode_check.value,
+                "use_excessive_hyphens": use_excessive_hyphens.value,
+                "use_long_label": use_long_label.value,
+                "use_hex_string": use_hex_string.value,
+                "use_suspicious_tld": use_suspicious_tld.value,
+                "use_dga_pattern": use_dga_pattern.value,
+                
+                # DNS ML method
+                "use_ml_model": use_ml_model_check.value,
+                
+                # DNS Thresholds
+                "ml_threshold": ml_threshold_slider.value,
+                "suspicious_tld_threshold": suspicious_tld_threshold_slider.value,
+                
+                # IP Filter methods
+                "ip_use_blocklist": ip_use_blocklist.value,
+                "ip_region_block": ip_region_block.value,
+                "ip_regex_check": ip_regex_check.value,
+                "ip_asn_block": ip_asn_block.value,
+                "ip_rate_limit_check": ip_rate_limit_check.value,
+                "ip_block_tor": ip_block_tor.value,
+                "ip_block_vpn": ip_block_vpn.value,
+                "ip_block_proxy": ip_block_proxy.value,
+                "ip_block_datacenter": ip_block_datacenter.value,
+                
+                # IP Rate limiting
+                "ip_max_requests": int(ip_max_requests_input.value) if ip_max_requests_input.value else 100,
+                "ip_time_window": int(ip_time_window_input.value) if ip_time_window_input.value else 60
+            }
             
-            # Heuristic methods
-            "use_ip_check": use_ip_check.value,
-            "use_punycode_check": use_punycode_check.value,
-            "use_excessive_hyphens": use_excessive_hyphens.value,
-            "use_long_label": use_long_label.value,
-            "use_hex_string": use_hex_string.value,
-            "use_suspicious_tld": use_suspicious_tld.value,
-            "use_dga_pattern": use_dga_pattern.value,
+            save_filter_config(new_config)
             
-            # ML method
-            "use_ml_model": use_ml_model_check.value,
+            settings_status.value = "✓ Settings saved successfully! Restart filter for changes to take effect."
+            settings_status.color = "green"
             
-            # Thresholds
-            "ml_threshold": ml_threshold_slider.value,
-            "suspicious_tld_threshold": suspicious_tld_threshold_slider.value
-        }
-        
-        save_filter_config(new_config)
-        
-        settings_status.value = "✓ Settings saved successfully! Restart filter for changes to take effect."
-        settings_status.color = "green"
-        
-        enabled_count = sum(1 for k, v in new_config.items() if k.startswith('use_') and v)
-        add_log_to_ui(f"✓ Filter settings updated ({enabled_count} methods enabled)")
+            dns_enabled = sum(1 for k, v in new_config.items() if k.startswith('use_') and v)
+            ip_enabled = sum(1 for k, v in new_config.items() if k.startswith('ip_') and isinstance(v, bool) and v)
+            
+            add_log_to_ui(f"✓ Filter settings updated")
+            add_log_to_ui(f"  DNS methods: {dns_enabled} enabled")
+            add_log_to_ui(f"  IP methods: {ip_enabled} enabled")
+            
+        except ValueError as ve:
+            settings_status.value = f"✗ Invalid parameter: {str(ve)}"
+            settings_status.color = "red"
+            add_log_to_ui(f"✗ Settings save failed: Invalid parameter")
         
         page.update()
     
     settings_tab = ft.Container(
         content=ft.Column([
-            ft.Text("Filter Settings", size=20, weight=ft.FontWeight.BOLD),
-            ft.Container(height=20),
-            
-            # Core Methods Section
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Icon(ft.Icons.SHIELD, size=24, color="blue"),
-                        ft.Text("Core Methods", size=16, weight=ft.FontWeight.BOLD)
-                    ], spacing=10),
-                    ft.Divider(),
-                    use_whitelist_check,
-                    use_manual_list_check,
-                ]),
-                bgcolor="#2C2C2C",
-                padding=15,
-                border_radius=10,
-                width=700
-            ),
-            
+            ft.Text("Filter Settings", size=22, weight=ft.FontWeight.BOLD),
             ft.Container(height=15),
             
-            # Heuristic Methods Section
+            # DNS FILTER SECTION
+            ft.Text("━━━ DNS FILTERING ━━━", size=18, weight=ft.FontWeight.BOLD, color="cyan"),
+            ft.Container(height=10),
+            
+            # DNS Core Methods Section
             ft.Container(
                 content=ft.Column([
                     ft.Row([
-                        ft.Icon(ft.Icons.PATTERN, size=24, color="orange"),
-                        ft.Text("Heuristic Detection Methods", size=16, weight=ft.FontWeight.BOLD)
+                        ft.Icon(ft.Icons.SHIELD, size=22, color="blue"),
+                        ft.Text("DNS Core Methods", size=15, weight=ft.FontWeight.BOLD)
                     ], spacing=10),
-                    ft.Divider(),
-                    ft.Text(
-                        "Pattern-based detection for known malicious characteristics",
-                        size=11,
-                        color="grey"
-                    ),
-                    ft.Container(height=10),
-                    
+                    ft.Divider(height=1),
+                    ft.Row([
+                        use_whitelist_check,
+                        use_manual_list_check,
+                    ], spacing=20)
+                ]),
+                bgcolor="#2C2C2C",
+                padding=12,
+                border_radius=8,
+                width=900
+            ),
+            
+            ft.Container(height=10),
+            
+            # DNS Heuristic Methods Section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.PATTERN, size=22, color="orange"),
+                        ft.Text("DNS Heuristic Methods", size=15, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(height=1),
                     ft.Row([
                         ft.Column([
                             use_ip_check,
                             use_punycode_check,
                             use_excessive_hyphens,
-                        ], spacing=5),
+                        ], spacing=3),
                         ft.Column([
                             use_long_label,
                             use_hex_string,
                             use_dga_pattern,
-                        ], spacing=5),
+                        ], spacing=3),
                         ft.Column([
                             use_suspicious_tld,
-                        ], spacing=5),
-                    ], spacing=30)
+                        ], spacing=3),
+                    ], spacing=40)
                 ]),
                 bgcolor="#2C2C2C",
-                padding=15,
-                border_radius=10,
-                width=700
+                padding=12,
+                border_radius=8,
+                width=900
             ),
             
-            ft.Container(height=15),
+            ft.Container(height=10),
             
-            # ML Method Section
+            # DNS ML Method Section
             ft.Container(
                 content=ft.Column([
                     ft.Row([
-                        ft.Icon(ft.Icons.PSYCHOLOGY, size=24, color="green"),
-                        ft.Text("Machine Learning", size=16, weight=ft.FontWeight.BOLD)
+                        ft.Icon(ft.Icons.PSYCHOLOGY, size=22, color="green"),
+                        ft.Text("DNS Machine Learning", size=15, weight=ft.FontWeight.BOLD)
                     ], spacing=10),
-                    ft.Divider(),
+                    ft.Divider(height=1),
                     use_ml_model_check,
                     
-                    ft.Container(height=15),
-                    ft.Divider(),
+                    ft.Container(height=10),
                     
-                    ft.Text("ML Model Threshold", size=14, weight=ft.FontWeight.BOLD),
-                    ft.Text(
-                        "Domains with scores above this threshold will be blocked",
-                        size=11,
-                        color="grey"
-                    ),
-                    ft.Container(height=5),
+                    ft.Text("ML Model Threshold", size=13, weight=ft.FontWeight.BOLD),
                     ml_threshold_slider,
                     ml_threshold_text,
                     
-                    ft.Container(height=15),
+                    ft.Container(height=10),
                     
-                    ft.Text("Suspicious TLD Threshold", size=14, weight=ft.FontWeight.BOLD),
-                    ft.Text(
-                        "Lower threshold for domains with suspicious TLDs (.tk, .ml, etc.)",
-                        size=11,
-                        color="grey"
-                    ),
-                    ft.Container(height=5),
+                    ft.Text("Suspicious TLD Threshold", size=13, weight=ft.FontWeight.BOLD),
                     suspicious_tld_threshold_slider,
                     suspicious_tld_threshold_text,
                 ]),
                 bgcolor="#2C2C2C",
-                padding=15,
-                border_radius=10,
-                width=700
+                padding=12,
+                border_radius=8,
+                width=900
             ),
             
             ft.Container(height=20),
             
+            # IP FILTER SECTION
+            ft.Text("━━━ IP FILTERING ━━━", size=18, weight=ft.FontWeight.BOLD, color="cyan"),
+            ft.Container(height=10),
+            
+            # IP Core Methods
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SECURITY, size=22, color="red"),
+                        ft.Text("IP Filter Methods", size=15, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(height=1),
+                    ft.Row([
+                        ft.Column([
+                            ip_use_blocklist,
+                            ip_region_block,
+                            ip_regex_check,
+                        ], spacing=3),
+                        ft.Column([
+                            ip_asn_block,
+                            ip_rate_limit_check,
+                            ip_block_tor,
+                        ], spacing=3),
+                        ft.Column([
+                            ip_block_vpn,
+                            ip_block_proxy,
+                            ip_block_datacenter,
+                        ], spacing=3),
+                    ], spacing=40)
+                ]),
+                bgcolor="#2C2C2C",
+                padding=12,
+                border_radius=8,
+                width=900
+            ),
+            
+            ft.Container(height=10),
+            
+            # IP Rate Limit Parameters
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SPEED, size=22, color="purple"),
+                        ft.Text("Rate Limiting Parameters", size=15, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(height=1),
+                    ft.Text("(Only active when Rate Limiting is enabled)", size=10, color="grey", italic=True),
+                    ft.Container(height=5),
+                    ft.Row([
+                        ip_max_requests_input,
+                        ip_time_window_input,
+                    ], spacing=20)
+                ]),
+                bgcolor="#2C2C2C",
+                padding=12,
+                border_radius=8,
+                width=900
+            ),
+            
+            ft.Container(height=20),
+            
+            # Save Button
             ft.ElevatedButton(
-                "Save Settings",
+                "💾 Save All Settings",
                 icon=ft.Icons.SAVE,
                 on_click=save_settings,
-                width=200,
-                height=45
+                width=250,
+                height=50,
+                style=ft.ButtonStyle(
+                    bgcolor=ft.Colors.GREEN_700,
+                    color=ft.Colors.WHITE
+                )
             ),
             settings_status,
             
             ft.Container(height=15),
             
+            # Info Box
             ft.Container(
                 content=ft.Column([
                     ft.Icon(ft.Icons.INFO_OUTLINE, color="blue", size=24),
                     ft.Text(
-                        "Note: Settings are saved immediately but require restarting the filter to take effect.",
+                        "Settings are saved immediately but require restarting the filter to take effect.",
                         size=11,
                         color="grey",
                         text_align=ft.TextAlign.CENTER
+                    ),
+                    ft.Text(
+                        "DNS methods affect domain classification. IP methods affect resolved IP addresses.",
+                        size=10,
+                        color="grey",
+                        text_align=ft.TextAlign.CENTER,
+                        italic=True
                     )
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor="#2C2C2C",
-                padding=15,
-                border_radius=10,
-                width=700
+                padding=12,
+                border_radius=8,
+                width=900
             )
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, scroll="auto"),
         padding=20,
