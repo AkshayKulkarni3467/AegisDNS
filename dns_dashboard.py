@@ -37,7 +37,7 @@ is_filter_running = False
 ip_filter = IPFilterSystem()
 
 # Configuration file for filter settings
-FILTER_CONFIG_PATH = "filter_config.json"
+FILTER_CONFIG_PATH = "configs/filter_config.json"
 
 # Default filter configuration
 default_filter_config = {
@@ -118,7 +118,7 @@ def main(page: ft.Page):
     def load_initial_logs():
         """Load the last 50 logs from file"""
         try:
-            with open("dns_filter.log", "r", encoding="utf-8") as f:
+            with open("dns_logs/dns_filter.log", "r", encoding="utf-8") as f:
                 logs = f.readlines()
                 for log in logs[-50:]:
                     log_text = log.strip()

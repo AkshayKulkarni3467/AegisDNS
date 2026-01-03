@@ -9,12 +9,13 @@ import dns.resolver
 from dns_utils import log_request, load_dns_blocklist, load_ip_blocklist
 from dns_model import load_model, predict_domain
 from ip_model import IPFilterSystem
+from website_analyzer import WebsiteAnalyzer
 
 DNS_BLOCKLIST_FILE = "manual_lists/domain_blocklist.txt"
 IP_BLOCKLIST_FILE = "manual_lists/ip_blocklist.txt"
 WHITELIST_FILE = "manual_lists/domain_whitelist.txt"
-FILTER_CONFIG_PATH = "filter_config.json"
-DNS_CACHE_DB = "dns_cache.db"
+FILTER_CONFIG_PATH = "configs/filter_config.json"
+DNS_CACHE_DB = "dns_database/dns_cache.db"
 
 # Major legitimate domains whitelist
 LEGITIMATE_DOMAINS_WHITELIST = {
@@ -49,6 +50,7 @@ manual_whitelist = set()
 
 resolver = dns.resolver.Resolver()
 ip_filter = IPFilterSystem()
+website_analyzer = WebsiteAnalyzer()
 
 
 class DNSCache:
@@ -201,7 +203,9 @@ def load_filter_config():
         "use_dga_pattern": True,
         "use_ml_model": True,
         "ml_threshold": 0.85,
-        "suspicious_tld_threshold": 0.6
+        "suspicious_tld_threshold": 0.6,
+        "use_website_analysis": False,  # New feature - disabled by default
+        "website_analysis_threshold": 0.7
     }
 
 
@@ -320,7 +324,7 @@ def check_suspicious_tld(domain, config):
     return False, 0.0
 
 
-def dns_action_with_config(qname, model, feature_extractor, blocklist, manual_whitelist, config):
+def dns_action_with_config(qname, model, feature_extractor, blocklist, manual_whitelist, config, log_func=None):
     """Make DNS decision based on configuration"""
     qname = qname.strip().lower().rstrip(".")
     
@@ -359,7 +363,58 @@ def dns_action_with_config(qname, model, feature_extractor, blocklist, manual_wh
     has_suspicious_tld, modified_threshold = check_suspicious_tld(qname, config)
     ml_threshold = modified_threshold if has_suspicious_tld else config.get("ml_threshold", 0.85)
     
-    # ML model prediction (if enabled)
+    # Website Analysis (if enabled - runs INSTEAD of ML)
+    if config.get("use_website_analysis", False):
+        try:
+            if log_func:
+                log_func(f"🔍 Analyzing website: {qname}")
+            
+            # Perform website analysis
+            analysis_result = website_analyzer.analyze_website(qname, full_analysis=True)
+            
+            website_score = analysis_result.get('threat_score', 0.0)
+            website_threshold = config.get('website_analysis_threshold', 0.7)
+            
+            if log_func:
+                log_func(f"  Website threat score: {website_score:.2f}")
+            
+            # Make decision based on website analysis
+            if website_score >= website_threshold:
+                return {
+                    "domain": qname,
+                    "decision": "BLOCKED",
+                    "score": website_score,
+                    "reason": "website:malicious",
+                    "website_analysis": analysis_result
+                }
+            elif website_score >= 0.4:
+                return {
+                    "domain": qname,
+                    "decision": "FLAGGED",
+                    "score": website_score,
+                    "reason": "website:suspicious",
+                    "website_analysis": analysis_result
+                }
+            else:
+                return {
+                    "domain": qname,
+                    "decision": "ALLOWED",
+                    "score": website_score,
+                    "reason": "website:safe",
+                    "website_analysis": analysis_result
+                }
+        except Exception as e:
+            if log_func:
+                log_func(f"  Website analysis failed: {e}")
+            # Fall back to allowing if website analysis fails
+            return {
+                "domain": qname,
+                "decision": "ALLOWED",
+                "score": 0.0,
+                "reason": "error:website_analysis_failed"
+            }
+    
+    # ML model prediction (if enabled and website analysis is NOT enabled)
     if config.get("use_ml_model", True):
         try:
             score = predict_domain(qname, model, feature_extractor)
@@ -446,7 +501,7 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             return
     
     # Use config-aware DNS action with all methods
-    dns_a = dns_action_with_config(qname, model, feature_extractor, dns_blocklist, manual_whitelist, filter_config)
+    dns_a = dns_action_with_config(qname, model, feature_extractor, dns_blocklist, manual_whitelist, filter_config, log_func)
     
     if dns_a["decision"] == "BLOCKED":
         reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, ra=1, rcode=RCODE.NXDOMAIN))
@@ -509,6 +564,9 @@ def start_dns_server(log_func, listen_ip="0.0.0.0", listen_port=6667, upstream_d
     enabled_methods = [k for k, v in filter_config.items() if isinstance(v, bool) and v]
     log_func(f"Filter configuration loaded: {len(enabled_methods)} methods enabled")
     log_func(f"ML Threshold: {filter_config.get('ml_threshold', 0.85):.2f}")
+    
+    if filter_config.get("use_website_analysis", False):
+        log_func(f"Website Analysis: ENABLED (threshold: {filter_config.get('website_analysis_threshold', 0.7):.2f})")
     
     # Log cache statistics
     stats = dns_cache.get_stats()

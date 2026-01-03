@@ -69,7 +69,7 @@ def log_request(client_ip, client_port, domain, action, log_func):
     
     print(log_entry)
     
-    with open("dns_filter.log", "a", encoding="utf-8") as logfile:
+    with open("dns_logs/dns_filter.log", "a", encoding="utf-8") as logfile:
         logfile.write(log_entry + "\n")
         
 def save_blocklist(blocklist_file, entries):
