@@ -1,8 +1,5 @@
 dns_model
-results
 dns_logs
 __pycache__
-configs
-dns_database
-ip_feeds
-manual_lists
+configs/api_keys.json
+assets

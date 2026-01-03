@@ -5,6 +5,8 @@ import json
 import os
 import dns_controller
 from dns_utils import load_dns_blocklist, load_ip_blocklist, save_blocklist
+from website_analyzer import WebsiteAnalyzer
+
 
 # Add whitelist functions
 def load_whitelist(filepath="manual_lists/domain_whitelist.txt"):
@@ -39,6 +41,9 @@ ip_filter = IPFilterSystem()
 # Configuration file for filter settings
 FILTER_CONFIG_PATH = "configs/filter_config.json"
 
+#Website Analyser
+website_analyzer = WebsiteAnalyzer()
+
 # Default filter configuration
 default_filter_config = {
     # DNS Core methods
@@ -53,6 +58,9 @@ default_filter_config = {
     "use_hex_string": True,
     "use_suspicious_tld": True,
     "use_dga_pattern": True,
+    
+    "use_website_analysis": False,
+    "website_analysis_threshold": 0.7,
     
     # DNS ML method
     "use_ml_model": True,
@@ -109,6 +117,8 @@ def main(page: ft.Page):
     page.window_height = 750
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
+    
+    page.window.icon = "assets/logo.ico"
 
     # Load current filter config
     filter_config = load_filter_config()
@@ -144,6 +154,8 @@ def main(page: ft.Page):
             color = "lightgreen"
         elif "✗" in message or "⚠" in message:
             color = "orange"
+        elif "🔍" in message:  # ADD THIS LINE for website analysis
+            color = "cyan"
 
         log_viewer_container.controls.insert(
             0, 
@@ -366,6 +378,11 @@ def main(page: ft.Page):
                     ft.Row([
                         ft.Container(width=12, height=12, bgcolor="yellow", border_radius=6),
                         ft.Text("Cached", size=10)
+                    ], spacing=5),
+                    # ADD THIS ROW
+                    ft.Row([
+                        ft.Container(width=12, height=12, bgcolor="cyan", border_radius=6),
+                        ft.Text("Website Analysis", size=10)
                     ], spacing=5)
                 ], spacing=20),
                 padding=10
@@ -778,6 +795,430 @@ def main(page: ft.Page):
         padding=20,
         expand=True
     )
+    
+
+    # ==================== NEW Tab: Website Analysis ====================
+    # Add this after Tab 6 (Model Updates) and before Tab 7 (Settings)
+
+    # Analysis UI state variables
+    analysis_domain_input = ft.TextField(
+        label="Domain to Analyze",
+        hint_text="e.g., example.com or https://example.com",
+        expand=True,
+        autofocus=True
+    )
+
+    analysis_progress = ft.ProgressBar(visible=False)
+    analysis_status = ft.Text("", size=12)
+    analysis_results_container = ft.Column(controls=[], scroll="auto", expand=True)
+
+    def format_ssl_info(ssl_info):
+        """Format SSL information for display"""
+        if not ssl_info:
+            return ft.Text("No SSL information available", color="grey", size=11)
+        
+        valid = ssl_info.get('valid', False)
+        color = "green" if valid else "red"
+        icon = ft.Icons.LOCK if valid else ft.Icons.LOCK_OPEN
+        
+        items = [
+            ft.Row([
+                ft.Icon(icon, color=color, size=16),
+                ft.Text(f"Valid: {valid}", color=color, size=11, weight=ft.FontWeight.BOLD)
+            ], spacing=5)
+        ]
+        
+        # Fixed issuer handling - handle both dict and other formats
+        if ssl_info.get('issuer'):
+            issuer = ssl_info['issuer']
+            
+            # Handle different issuer formats
+            if isinstance(issuer, dict):
+                # It's already a dictionary
+                issuer_text = issuer.get('organizationName', issuer.get('commonName', 'Unknown'))
+            elif isinstance(issuer, list):
+                # Convert list of tuples to dict
+                try:
+                    issuer_dict = dict(issuer)
+                    issuer_text = issuer_dict.get('organizationName', issuer_dict.get('commonName', 'Unknown'))
+                except:
+                    issuer_text = str(issuer)
+            else:
+                # Fallback to string representation
+                issuer_text = str(issuer)
+            
+            items.append(ft.Text(f"Issuer: {issuer_text}", size=10, color="grey"))
+        
+        if ssl_info.get('expiry'):
+            items.append(ft.Text(f"Expires: {ssl_info['expiry']}", size=10, color="grey"))
+        
+        if ssl_info.get('version'):
+            items.append(ft.Text(f"TLS Version: {ssl_info['version']}", size=10, color="grey"))
+        
+        if ssl_info.get('warnings'):
+            for warning in ssl_info['warnings']:
+                items.append(ft.Text(f"⚠ {warning}", size=10, color="orange"))
+        
+        return ft.Column(items, spacing=2)
+
+    def format_content_analysis(content_analysis):
+        """Format content analysis for display"""
+        if not content_analysis:
+            return ft.Text("No content analysis available", color="grey", size=11)
+        
+        items = []
+        
+        # Forms
+        forms = content_analysis.get('forms', [])
+        if forms:
+            items.append(ft.Text(f"Forms Found: {len(forms)}", size=11, weight=ft.FontWeight.BOLD))
+            for i, form in enumerate(forms[:3], 1):  # Show first 3 forms
+                items.append(ft.Text(
+                    f"  Form {i}: {form.get('method', 'GET').upper()} → {form.get('action', '(current page)')[:50]}",
+                    size=10, color="grey"
+                ))
+                if form.get('has_password'):
+                    items.append(ft.Text("    Contains password field", size=9, color="yellow"))
+        
+        # iFrames
+        iframes = content_analysis.get('iframes', [])
+        if iframes:
+            items.append(ft.Container(height=5))
+            items.append(ft.Text(f"iFrames: {len(iframes)}", size=11, weight=ft.FontWeight.BOLD))
+            for iframe in iframes[:3]:
+                items.append(ft.Text(f"  {iframe[:60]}...", size=10, color="grey"))
+        
+        # Scripts
+        scripts = content_analysis.get('scripts', [])
+        if scripts:
+            items.append(ft.Container(height=5))
+            items.append(ft.Text(f"External Scripts: {len(scripts)}", size=11, weight=ft.FontWeight.BOLD))
+        
+        # Suspicious patterns
+        patterns = content_analysis.get('suspicious_patterns', [])
+        if patterns:
+            items.append(ft.Container(height=5))
+            items.append(ft.Text("⚠ Suspicious Patterns:", size=11, weight=ft.FontWeight.BOLD, color="orange"))
+            for pattern in patterns:
+                items.append(ft.Text(f"  • {pattern}", size=10, color="orange"))
+        
+        # Obfuscation
+        if content_analysis.get('obfuscation_detected'):
+            items.append(ft.Container(height=5))
+            items.append(ft.Row([
+                ft.Icon(ft.Icons.WARNING, color="red", size=16),
+                ft.Text("Obfuscated JavaScript Detected!", size=11, color="red", weight=ft.FontWeight.BOLD)
+            ], spacing=5))
+        
+        return ft.Column(items, spacing=2) if items else ft.Text("No issues found", color="green", size=11)
+
+    def format_threat_indicators(threats):
+        """Format threat indicators for display"""
+        if not threats:
+            return ft.Text("No threats detected", color="green", size=11, weight=ft.FontWeight.BOLD)
+        
+        items = []
+        
+        # Group by severity
+        high = [t for t in threats if t.get('severity') == 'HIGH']
+        medium = [t for t in threats if t.get('severity') == 'MEDIUM']
+        low = [t for t in threats if t.get('severity') == 'LOW']
+        
+        if high:
+            items.append(ft.Text(f"🔴 HIGH Severity ({len(high)}):", size=11, weight=ft.FontWeight.BOLD, color="red"))
+            for threat in high:
+                items.append(ft.Text(f"  • {threat.get('description', 'Unknown')}", size=10, color="red"))
+            items.append(ft.Container(height=5))
+        
+        if medium:
+            items.append(ft.Text(f"🟠 MEDIUM Severity ({len(medium)}):", size=11, weight=ft.FontWeight.BOLD, color="orange"))
+            for threat in medium:
+                items.append(ft.Text(f"  • {threat.get('description', 'Unknown')}", size=10, color="orange"))
+            items.append(ft.Container(height=5))
+        
+        if low:
+            items.append(ft.Text(f"🟡 LOW Severity ({len(low)}):", size=11, weight=ft.FontWeight.BOLD, color="yellow"))
+            for threat in low:
+                items.append(ft.Text(f"  • {threat.get('description', 'Unknown')}", size=10, color="yellow"))
+        
+        return ft.Column(items, spacing=2)
+
+    def format_behavior_analysis(behavior):
+        """Format behavior analysis for display"""
+        if not behavior:
+            return ft.Text("No behavioral analysis available", color="grey", size=11)
+        
+        items = []
+        
+        checks = [
+            ("Auto-Redirect", behavior.get('auto_redirect'), "Automatic page redirection detected"),
+            ("Popup Indicators", behavior.get('popup_indicators'), "May open popup windows"),
+            ("Download Triggers", behavior.get('download_triggers'), "May trigger automatic downloads"),
+            ("Fingerprinting", behavior.get('fingerprinting'), "Browser fingerprinting detected")
+        ]
+        
+        for name, detected, description in checks:
+            if detected:
+                items.append(ft.Row([
+                    ft.Icon(ft.Icons.WARNING, color="orange", size=14),
+                    ft.Text(f"{name}: {description}", size=10, color="orange")
+                ], spacing=5))
+        
+        if not items:
+            items.append(ft.Text("No suspicious behavior detected", color="green", size=11))
+        
+        return ft.Column(items, spacing=3)
+
+    def create_score_indicator(score):
+        """Create a visual score indicator"""
+        percentage = int(score * 100)
+        
+        if score >= 0.7:
+            color = "red"
+            status = "MALICIOUS"
+            icon = ft.Icons.DANGEROUS
+        elif score >= 0.4:
+            color = "orange"
+            status = "SUSPICIOUS"
+            icon = ft.Icons.WARNING
+        else:
+            color = "green"
+            status = "SAFE"
+            icon = ft.Icons.CHECK_CIRCLE
+        
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(icon, color=color, size=40),
+                    ft.Column([
+                        ft.Text(status, size=20, weight=ft.FontWeight.BOLD, color=color),
+                        ft.Text(f"Threat Score: {percentage}%", size=14, color=color)
+                    ], spacing=0)
+                ], spacing=10, alignment=ft.MainAxisAlignment.CENTER),
+                ft.Container(height=10),
+                ft.ProgressBar(value=score, color=color, bgcolor="#2C2C2C", height=10)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor="#2C2C2C",
+            padding=20,
+            border_radius=10,
+            border=ft.border.all(2, color)
+        )
+
+    def analyze_website(e):
+        """Perform website analysis"""
+        domain = analysis_domain_input.value.strip()
+        
+        if not domain:
+            analysis_status.value = "⚠ Please enter a domain"
+            analysis_status.color = "orange"
+            page.update()
+            return
+        
+        # Clear previous results
+        analysis_results_container.controls.clear()
+        analysis_progress.visible = True
+        analysis_status.value = f"🔍 Analyzing {domain}..."
+        analysis_status.color = "blue"
+        page.update()
+        
+        def run_analysis():
+            try:
+                add_log_to_ui(f"🔍 Starting website analysis for: {domain}")
+                
+                # Perform analysis
+                result = website_analyzer.analyze_website(domain, full_analysis=True)
+                
+                # Check for errors
+                if 'error' in result:
+                    analysis_status.value = f"✗ Analysis failed: {result['error']}"
+                    analysis_status.color = "red"
+                    add_log_to_ui(f"✗ Website analysis failed for {domain}: {result['error']}")
+                    analysis_progress.visible = False
+                    page.update()
+                    return
+                
+                # Extract data
+                threat_score = result.get('threat_score', 0.0)
+                is_malicious = result.get('is_malicious', False)
+                static = result.get('static_analysis', {})
+                dynamic = result.get('dynamic_analysis', {})
+                
+                # Build results UI
+                analysis_results_container.controls.clear()
+                
+                # 1. Overall Score
+                analysis_results_container.controls.append(create_score_indicator(threat_score))
+                analysis_results_container.controls.append(ft.Container(height=20))
+                
+                # 2. Static Analysis Section
+                analysis_results_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([
+                                ft.Icon(ft.Icons.INVENTORY, size=20, color="blue"),
+                                ft.Text("Static Analysis", size=16, weight=ft.FontWeight.BOLD)
+                            ], spacing=10),
+                            ft.Divider(height=1, color="grey"),
+                            ft.Container(height=5),
+                            
+                            # SSL Info
+                            ft.Text("SSL/TLS Certificate:", size=12, weight=ft.FontWeight.BOLD),
+                            format_ssl_info(static.get('ssl_info', {})),
+                            ft.Container(height=10),
+                            
+                            # Content Analysis
+                            ft.Text("Content Analysis:", size=12, weight=ft.FontWeight.BOLD),
+                            format_content_analysis(static.get('content_analysis', {})),
+                            ft.Container(height=10),
+                            
+                            # Threat Indicators
+                            ft.Text("Threat Indicators:", size=12, weight=ft.FontWeight.BOLD),
+                            format_threat_indicators(static.get('threat_indicators', []))
+                        ]),
+                        bgcolor="#2C2C2C",
+                        padding=15,
+                        border_radius=10
+                    )
+                )
+                
+                analysis_results_container.controls.append(ft.Container(height=15))
+                
+                # 3. Dynamic Analysis Section (if available)
+                if dynamic and dynamic != {}:
+                    analysis_results_container.controls.append(
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon(ft.Icons.PSYCHOLOGY, size=20, color="purple"),
+                                    ft.Text("Dynamic Analysis", size=16, weight=ft.FontWeight.BOLD)
+                                ], spacing=10),
+                                ft.Divider(height=1, color="grey"),
+                                ft.Container(height=5),
+                                
+                                # Redirects
+                                ft.Text(f"Redirects: {len(dynamic.get('redirects', []))}", size=11, color="grey"),
+                                ft.Container(height=5),
+                                
+                                # Behavior Analysis
+                                ft.Text("Behavioral Analysis:", size=12, weight=ft.FontWeight.BOLD),
+                                format_behavior_analysis(dynamic.get('behavior_analysis', {})),
+                                ft.Container(height=10),
+                                
+                                # External Resources
+                                ft.Text("External Resources:", size=12, weight=ft.FontWeight.BOLD),
+                                ft.Text(
+                                    f"Scripts: {len(dynamic.get('external_resources', {}).get('external_scripts', []))}",
+                                    size=10, color="grey"
+                                ),
+                                ft.Text(
+                                    f"Links: {len(dynamic.get('external_resources', {}).get('external_links', []))}",
+                                    size=10, color="grey"
+                                ),
+                                ft.Text(
+                                    f"Suspicious Domains: {len(dynamic.get('external_resources', {}).get('suspicious_domains', []))}",
+                                    size=10, color="orange" if dynamic.get('external_resources', {}).get('suspicious_domains') else "grey"
+                                ),
+                            ]),
+                            bgcolor="#2C2C2C",
+                            padding=15,
+                            border_radius=10
+                        )
+                    )
+                
+                # Update status
+                status_text = f"✓ Analysis complete: {domain} is "
+                status_text += "MALICIOUS" if is_malicious else ("SUSPICIOUS" if threat_score >= 0.4 else "SAFE")
+                analysis_status.value = status_text
+                analysis_status.color = "red" if is_malicious else ("orange" if threat_score >= 0.4 else "green")
+                
+                log_msg = f"✓ Website analysis complete for {domain}: "
+                log_msg += f"Score={threat_score:.2f}, Status={'MALICIOUS' if is_malicious else 'SAFE'}"
+                add_log_to_ui(log_msg)
+                
+            except Exception as ex:
+                analysis_status.value = f"✗ Analysis error: {str(ex)}"
+                analysis_status.color = "red"
+                add_log_to_ui(f"✗ Website analysis error for {domain}: {ex}")
+                
+                # Show error in results
+                analysis_results_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.ERROR, color="red", size=40),
+                            ft.Text("Analysis Failed", size=18, color="red", weight=ft.FontWeight.BOLD),
+                            ft.Text(str(ex), size=12, color="grey", text_align=ft.TextAlign.CENTER)
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                        bgcolor="#2C2C2C",
+                        padding=30,
+                        border_radius=10
+                    )
+                )
+            
+            finally:
+                analysis_progress.visible = False
+                page.update()
+        
+        # Run in thread to avoid blocking UI
+        threading.Thread(target=run_analysis, daemon=True).start()
+
+    analysis_domain_input.on_submit = analyze_website
+
+    website_analysis_tab = ft.Container(
+        content=ft.Column([
+            ft.Text("Website Security Analysis", size=20, weight=ft.FontWeight.BOLD),
+            ft.Container(height=5),
+            ft.Text(
+                "Perform deep static and dynamic analysis on any website",
+                size=11,
+                color="grey",
+                italic=True
+            ),
+            ft.Container(height=15),
+            
+            # Input section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SEARCH, size=20),
+                        ft.Text("Enter Domain", size=14, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(height=1),
+                    ft.Row([
+                        analysis_domain_input,
+                        ft.ElevatedButton(
+                            "Analyze",
+                            icon=ft.Icons.TRAVEL_EXPLORE,
+                            on_click=analyze_website,
+                            bgcolor="#1976D2",
+                            color="white",
+                            height=50,
+                            width=120
+                        )
+                    ], spacing=10),
+                    analysis_progress,
+                    analysis_status
+                ]),
+                bgcolor="#2C2C2C",
+                padding=15,
+                border_radius=10
+            ),
+            
+            ft.Container(height=20),
+            
+            # Results section
+            ft.Text("Analysis Results", size=16, weight=ft.FontWeight.BOLD),
+            ft.Container(height=10),
+            ft.Container(
+                content=analysis_results_container,
+                bgcolor="#1E1E1E",
+                border_radius=10,
+                padding=15,
+                expand=True
+            )
+        ], scroll="auto", expand=True),
+        padding=20,
+        expand=True
+    )
 
     # ==================== Tab 7: Settings ====================
     
@@ -839,6 +1280,30 @@ def main(page: ft.Page):
         tooltip="Block domains with alternating consonant/vowel patterns"
     )
     
+    
+    # Website Analysis Method (NEW FEATURE)
+    use_website_analysis_check = ft.Checkbox(
+        label="Use Website Analysis",
+        value=filter_config.get("use_website_analysis", False),
+        tooltip="Analyze actual website content for threats (slower but more thorough)"
+    )
+    
+    website_analysis_threshold_slider = ft.Slider(
+        min=0.0,
+        max=1.0,
+        divisions=100,
+        value=filter_config.get("website_analysis_threshold", 0.7),
+        label="Website Analysis Threshold: {value}",
+        width=300
+    )
+
+    website_analysis_threshold_text = ft.Text(
+        f"Website Analysis Threshold: {filter_config.get('website_analysis_threshold', 0.7):.2f}",
+        size=12,
+        color="grey"
+    )
+
+
     # ML Method
     use_ml_model_check = ft.Checkbox(
         label="Use ML Model",
@@ -956,7 +1421,12 @@ def main(page: ft.Page):
     def on_suspicious_tld_threshold_change(e):
         suspicious_tld_threshold_text.value = f"Suspicious TLD Threshold: {e.control.value:.2f}"
         page.update()
-    
+
+    def on_website_threshold_change(e):
+        website_analysis_threshold_text.value = f"Website Analysis Threshold: {e.control.value:.2f}"
+        page.update()
+
+    website_analysis_threshold_slider.on_change = on_website_threshold_change
     ml_threshold_slider.on_change = on_ml_threshold_change
     suspicious_tld_threshold_slider.on_change = on_suspicious_tld_threshold_change
     
@@ -978,6 +1448,10 @@ def main(page: ft.Page):
                 "use_hex_string": use_hex_string.value,
                 "use_suspicious_tld": use_suspicious_tld.value,
                 "use_dga_pattern": use_dga_pattern.value,
+                
+                # Website Analysis (NEW)
+                "use_website_analysis": use_website_analysis_check.value,
+                "website_analysis_threshold": website_analysis_threshold_slider.value,
                 
                 # DNS ML method
                 "use_ml_model": use_ml_model_check.value,
@@ -1006,6 +1480,10 @@ def main(page: ft.Page):
             
             settings_status.value = "✓ Settings saved successfully! Restart filter for changes to take effect."
             settings_status.color = "green"
+            
+            # Log the update
+            if new_config.get("use_website_analysis"):
+                add_log_to_ui(f"✓ Website Analysis ENABLED (threshold: {new_config['website_analysis_threshold']:.2f})")
             
             dns_enabled = sum(1 for k, v in new_config.items() if k.startswith('use_') and v)
             ip_enabled = sum(1 for k, v in new_config.items() if k.startswith('ip_') and isinstance(v, bool) and v)
@@ -1111,6 +1589,48 @@ def main(page: ft.Page):
                 width=900
             ),
             
+            ft.Container(height=10),
+            
+            # Website Analysis Method Section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.TRAVEL_EXPLORE, size=22, color="purple"),
+                        ft.Text("Website Content Analysis", size=15, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(height=1),
+                    
+                    ft.Row([
+                        use_website_analysis_check,
+                        ft.Container(
+                            content=ft.Text(
+                                "⚠ Warning: Much slower than ML, analyzes actual website content",
+                                size=10,
+                                color="orange",
+                                italic=True
+                            ),
+                            padding=ft.padding.only(left=30)
+                        )
+                    ]),
+                    
+                    ft.Container(height=10),
+                    
+                    ft.Text("Website Analysis Threshold", size=13, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        "Higher = more strict (0.7 recommended). Scores ≥ threshold are blocked.",
+                        size=10,
+                        color="grey",
+                        italic=True
+                    ),
+                    website_analysis_threshold_slider,
+                    website_analysis_threshold_text,
+                ]),
+                bgcolor="#2C2C2C",
+                padding=12,
+                border_radius=8,
+                width=900
+            ),
+            
             ft.Container(height=20),
             
             # IP FILTER SECTION
@@ -1206,6 +1726,13 @@ def main(page: ft.Page):
                         color="grey",
                         text_align=ft.TextAlign.CENTER,
                         italic=True
+                    ),
+                    ft.Text(
+                        "Website Analysis: Fetches and analyzes actual website content (SSL, scripts, forms, etc.). Much slower but catches more threats.",
+                        size=9,
+                        color="cyan",
+                        text_align=ft.TextAlign.CENTER,
+                        italic=True
                     )
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor="#2C2C2C",
@@ -1255,6 +1782,11 @@ def main(page: ft.Page):
                 content=updates_tab
             ),
             ft.Tab(
+                text="Analyzer",  # NEW TAB
+                icon=ft.Icons.TRAVEL_EXPLORE,
+                content=website_analysis_tab
+            ),
+            ft.Tab(
                 text="Settings",
                 icon=ft.Icons.TUNE,
                 content=settings_tab
@@ -1271,4 +1803,4 @@ def main(page: ft.Page):
     update_blocklist_display()
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.app(target=main,assets_dir="assets")

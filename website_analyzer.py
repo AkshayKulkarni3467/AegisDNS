@@ -17,7 +17,7 @@ class WebsiteAnalyzer:
         self.virustotal_api_key = self._load_api_key("virustotal")
         self.urlscan_api_key = self._load_api_key("urlscan")
         self.analysis_cache = {}
-        self.cache_file = "website_analysis_cache.json"
+        self.cache_file = "wa_cache/website_analysis_cache.json"
         self._load_cache()
     
     def _load_api_key(self, service):
@@ -213,26 +213,38 @@ class WebsiteAnalyzer:
         }
         
         try:
+            # Remove https:// or http:// prefix if present
+            clean_domain = domain.replace('https://', '').replace('http://', '').split('/')[0]
+            
             context = ssl.create_default_context()
-            with socket.create_connection((domain, 443), timeout=5) as sock:
-                with context.wrap_socket(sock, server_hostname=domain) as ssock:
+            with socket.create_connection((clean_domain, 443), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=clean_domain) as ssock:
                     cert = ssock.getpeercert()
                     ssl_info['valid'] = True
-                    ssl_info['issuer'] = dict(x[0] for x in cert['issuer'])
-                    ssl_info['expiry'] = cert['notAfter']
+                    
+                    # Convert issuer to proper dict format
+                    issuer_list = cert.get('issuer', [])
+                    ssl_info['issuer'] = dict(x[0] for x in issuer_list) if issuer_list else {}
+                    
+                    ssl_info['expiry'] = cert.get('notAfter', 'Unknown')
                     ssl_info['version'] = ssock.version()
                     
                     # Check for self-signed
-                    if ssl_info['issuer'] == dict(x[0] for x in cert.get('subject', [])):
+                    subject_list = cert.get('subject', [])
+                    subject_dict = dict(x[0] for x in subject_list) if subject_list else {}
+                    
+                    if ssl_info['issuer'] == subject_dict:
                         ssl_info['warnings'].append('Self-signed certificate')
         
         except ssl.SSLError as e:
             ssl_info['warnings'].append(f'SSL Error: {str(e)}')
+        except socket.gaierror as e:
+            ssl_info['warnings'].append(f'DNS resolution failed: {str(e)}')
         except Exception as e:
             ssl_info['warnings'].append(f'Connection error: {str(e)}')
         
         return ssl_info
-    
+
     def _analyze_content(self, content, url):
         """Analyze HTML content for suspicious patterns"""
         soup = BeautifulSoup(content, 'html.parser')

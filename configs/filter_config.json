@@ -1,0 +1,14 @@
+{
+  "use_whitelist": true,
+  "use_manual_list": true,
+  "use_ip_check": true,
+  "use_punycode_check": true,
+  "use_excessive_hyphens": true,
+  "use_long_label": true,
+  "use_hex_string": true,
+  "use_suspicious_tld": true,
+  "use_dga_pattern": true,
+  "use_ml_model": false,
+  "ml_threshold": 0.85,
+  "suspicious_tld_threshold": 0.6
+}

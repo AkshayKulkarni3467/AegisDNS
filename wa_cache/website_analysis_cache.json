@@ -1,0 +1,393 @@
+{
+  "www.amazon.in": {
+    "timestamp": 1767452795.7333868,
+    "result": {
+      "domain": "www.amazon.in",
+      "url": "https://www.amazon.in",
+      "timestamp": "2026-01-03T20:36:31.351339",
+      "static_analysis": {
+        "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ssl_info": {
+          "valid": true,
+          "issuer": {
+            "countryName": "US",
+            "organizationName": "DigiCert Inc",
+            "commonName": "DigiCert Global CA G2"
+          },
+          "expiry": "Jul  2 23:59:59 2026 GMT",
+          "version": "TLSv1.3",
+          "warnings": []
+        },
+        "content_analysis": {
+          "forms": [],
+          "iframes": [],
+          "scripts": [],
+          "suspicious_patterns": [],
+          "obfuscation_detected": false
+        },
+        "threat_indicators": [
+          {
+            "type": "MISSING_SECURITY_HEADER",
+            "severity": "LOW",
+            "description": "Missing X-Frame-Options header (clickjacking risk)"
+          },
+          {
+            "type": "MISSING_SECURITY_HEADER",
+            "severity": "LOW",
+            "description": "Missing Content-Security-Policy header"
+          }
+        ],
+        "external_checks": {
+          "virustotal": {
+            "url_checked": true,
+            "hash_checked": false,
+            "detections": 0,
+            "total_engines": 0,
+            "malicious": false
+          }
+        }
+      },
+      "dynamic_analysis": {
+        "redirects": [],
+        "external_resources": {
+          "external_scripts": [],
+          "external_links": [],
+          "external_images": [],
+          "suspicious_domains": []
+        },
+        "javascript_analysis": {
+          "inline_scripts": 3,
+          "external_scripts": 0,
+          "suspicious_functions": [
+            "document.write",
+            "createElement"
+          ],
+          "dynamic_loading": true
+        },
+        "behavior_analysis": {
+          "auto_redirect": false,
+          "popup_indicators": false,
+          "download_triggers": false,
+          "fingerprinting": false
+        },
+        "urlscan_results": {
+          "submitted": true,
+          "scan_id": "019b8465-7748-7496-ad11-f77bf90eae31",
+          "result_url": "https://urlscan.io/result/019b8465-7748-7496-ad11-f77bf90eae31/"
+        }
+      },
+      "threat_score": 0.0,
+      "is_malicious": false,
+      "warnings": [],
+      "details": []
+    }
+  },
+  "www.monkeytype.com": {
+    "timestamp": 1767455708.332774,
+    "result": {
+      "domain": "www.monkeytype.com",
+      "url": "https://www.monkeytype.com",
+      "timestamp": "2026-01-03T21:25:03.368739",
+      "static_analysis": {
+        "content_hash": "8c42875b42c9152d6ac9b5578a9d6abb3acdfbe70f77dbaceafaf608c6c7e45b",
+        "ssl_info": {
+          "valid": true,
+          "issuer": {
+            "countryName": "US",
+            "organizationName": "Google Trust Services",
+            "commonName": "WE1"
+          },
+          "expiry": "Feb 21 09:57:15 2026 GMT",
+          "version": "TLSv1.3",
+          "warnings": []
+        },
+        "content_analysis": {
+          "forms": [
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 0
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 1
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 2
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 1
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 1
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 1
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 2
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 4
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": true,
+              "inputs": 5
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": true,
+              "inputs": 3
+            },
+            {
+              "action": "",
+              "method": "get",
+              "has_password": false,
+              "inputs": 1
+            }
+          ],
+          "iframes": [],
+          "scripts": [
+            "/js/monkeytype.z27a04t5.js",
+            "/@fs/Users/jackbartnik/Code/monkeytype/frontend/vite-plugins/oxlint-overlay.ts",
+            "/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js",
+            "https://www.google.com/recaptcha/api.js?render=explicit"
+          ],
+          "suspicious_patterns": [],
+          "obfuscation_detected": false
+        },
+        "threat_indicators": [
+          {
+            "type": "BASE64_ENCODING",
+            "severity": "MEDIUM",
+            "description": "Multiple base64 encoded strings detected"
+          }
+        ],
+        "external_checks": {
+          "virustotal": {
+            "url_checked": true,
+            "hash_checked": false,
+            "detections": 0,
+            "total_engines": 0,
+            "malicious": false
+          }
+        }
+      },
+      "dynamic_analysis": {
+        "redirects": [
+          {
+            "from": "https://www.monkeytype.com/",
+            "to": "https://monkeytype.com",
+            "status_code": 301
+          }
+        ],
+        "external_resources": {
+          "external_scripts": [
+            "https://www.google.com/recaptcha/api.js?render=explicit"
+          ],
+          "external_links": [
+            "https://ko-fi.com/monkeytype",
+            "https://www.patreon.com/monkeytype",
+            "https://monkeytype.store",
+            "https://x.com/monkeytype",
+            "https://discord.gg/monkeytype",
+            "https://github.com/monkeytypegame/monkeytype",
+            "https://www.reddit.com/user/montydrei",
+            "https://www.reddit.com/r/MechanicalKeyboards/comments/gc6wx3/experimenting_with_a_completely_new_type_of/",
+            "https://github.com/monkeytypegame/monkeytype/graphs/contributors",
+            "https://api.monkeytype.com/docs",
+            "https://github.com/monkeytypegame/monkeytype",
+            "https://www.discord.gg/monkeytype",
+            "https://x.com/monkeytype"
+          ],
+          "external_images": [],
+          "suspicious_domains": []
+        },
+        "javascript_analysis": {
+          "inline_scripts": 3,
+          "external_scripts": 4,
+          "suspicious_functions": [
+            "setTimeout",
+            "innerHTML",
+            "createElement"
+          ],
+          "dynamic_loading": true
+        },
+        "behavior_analysis": {
+          "auto_redirect": false,
+          "popup_indicators": true,
+          "download_triggers": true,
+          "fingerprinting": false
+        },
+        "urlscan_results": {
+          "submitted": true,
+          "scan_id": "019b8491-e8cd-73de-9253-e7fb0cb38234",
+          "result_url": "https://urlscan.io/result/019b8491-e8cd-73de-9253-e7fb0cb38234/"
+        }
+      },
+      "threat_score": 0.30000000000000004,
+      "is_malicious": false,
+      "warnings": [],
+      "details": []
+    }
+  },
+  "store.steampowered.com": {
+    "timestamp": 1767455905.6046414,
+    "result": {
+      "domain": "store.steampowered.com",
+      "url": "https://store.steampowered.com",
+      "timestamp": "2026-01-03T21:28:20.602471",
+      "static_analysis": {
+        "content_hash": "13dc65b458e7529c9c86a184bfa523691e95c0edb43a86bf42d595febf7221ac",
+        "ssl_info": {
+          "valid": true,
+          "issuer": {
+            "countryName": "US",
+            "organizationName": "DigiCert Inc",
+            "commonName": "DigiCert Global G3 TLS ECC SHA384 2020 CA1"
+          },
+          "expiry": "Aug 17 23:59:59 2026 GMT",
+          "version": "TLSv1.3",
+          "warnings": []
+        },
+        "content_analysis": {
+          "forms": [],
+          "iframes": [],
+          "scripts": [
+            "https://store.akamai.steamstatic.com/public/shared/javascript/jquery-1.8.3.min.js?v=NXam5zydzNu8&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/shared/javascript/tooltip.js?v=LZHsOVauqTrm&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/shared/javascript/shared_global.js?v=rLiUhbtlZk63&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/shared/javascript/auth_refresh.js?v=w6QbwI-5-j2S&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/main.js?v=HAXCBn_qtIWH&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/dynamicstore.js?v=SBXRiAJfiNfI&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/home.js?v=LeeMQv0o38G6&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/cluster.js?v=_t673ZDyh-Af&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/promo/salefunctions.js?v=Co4LUGLzdGlT&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/shared/javascript/shared_responsive_adapter.js?v=j0eobCNqcadg&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/applications/store/manifest.js?v=ZGgQyj2jXO72&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/applications/store/libraries~b28b7af69.js?v=L9JqUktT3bf9&l=english&_cdn=akamai",
+            "https://store.akamai.steamstatic.com/public/javascript/applications/store/main.js?v=dSwAtAnx_6wu&l=english&_cdn=akamai"
+          ],
+          "suspicious_patterns": [],
+          "obfuscation_detected": false
+        },
+        "threat_indicators": [
+          {
+            "type": "BASE64_ENCODING",
+            "severity": "MEDIUM",
+            "description": "Multiple base64 encoded strings detected"
+          }
+        ],
+        "external_checks": {
+          "virustotal": {
+            "url_checked": true,
+            "hash_checked": false,
+            "detections": 0,
+            "total_engines": 0,
+            "malicious": false
+          }
+        }
+      },
+      "dynamic_analysis": {
+        "redirects": [],
+        "external_resources": {
+          "external_scripts": [
+            "https://store.fastly.steamstatic.com/public/shared/javascript/jquery-1.8.3.min.js?v=NXam5zydzNu8&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/shared/javascript/tooltip.js?v=LZHsOVauqTrm&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/shared/javascript/shared_global.js?v=84qavQoecqcM&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/shared/javascript/auth_refresh.js?v=w6QbwI-5-j2S&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/main.js?v=HAXCBn_qtIWH&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/dynamicstore.js?v=3P4YAlppbh1T&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/home.js?v=OUm92GysP-Rv&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/cluster.js?v=Xhyo8cGiiO4M&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/promo/salefunctions.js?v=QClR0v-vRDBI&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/shared/javascript/shared_responsive_adapter.js?v=j0eobCNqcadg&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/applications/store/manifest.js?v=ZGgQyj2jXO72&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/applications/store/libraries~b28b7af69.js?v=L9JqUktT3bf9&l=english&_cdn=fastly",
+            "https://store.fastly.steamstatic.com/public/javascript/applications/store/main.js?v=dSwAtAnx_6wu&l=english&_cdn=fastly"
+          ],
+          "external_links": [
+            "https://steamcommunity.com/my/wishlist/",
+            "https://steamcommunity.com/",
+            "https://steamcommunity.com/",
+            "https://steamcommunity.com/discussions/",
+            "https://steamcommunity.com/workshop/",
+            "https://steamcommunity.com/market/",
+            "https://steamcommunity.com/?subsection=broadcasts",
+            "https://help.steampowered.com/en/",
+            "http://www.valvesoftware.com/legal.htm",
+            "https://help.steampowered.com/faqs/view/10BB-D27A-6378-4436",
+            "https://steamcommunity.com/my/wishlist/",
+            "https://steamcommunity.com/",
+            "https://steamcommunity.com/",
+            "https://steamcommunity.com/discussions/",
+            "https://steamcommunity.com/workshop/",
+            "https://steamcommunity.com/market/",
+            "https://steamcommunity.com/?subsection=broadcasts",
+            "https://help.steampowered.com/en/",
+            "https://www.valvesoftware.com/en/contact?contact-person=Translation%20Team%20Feedback",
+            "http://www.valvesoftware.com",
+            "https://help.steampowered.com/faqs/view/10BB-D27A-6378-4436?snr=1_44_44_",
+            "http://www.valvesoftware.com/about",
+            "http://www.valvesoftware.com",
+            "http://www.steampowered.com/steamworks/",
+            "https://partner.steamgames.com/steamdirect",
+            "https://help.steampowered.com/en/?snr=1_44_44_",
+            "https://steamcommunity.com/linkfilter/?u=http%3A%2F%2Fwww.facebook.com%2FSteam",
+            "http://twitter.com/steam",
+            "https://steamcommunity.com/linkfilter/?u=https%3A%2F%2Fbsky.app%2Fprofile%2Fsteampowered.com"
+          ],
+          "external_images": [],
+          "suspicious_domains": []
+        },
+        "javascript_analysis": {
+          "inline_scripts": 12,
+          "external_scripts": 13,
+          "suspicious_functions": [
+            "eval"
+          ],
+          "dynamic_loading": false
+        },
+        "behavior_analysis": {
+          "auto_redirect": false,
+          "popup_indicators": true,
+          "download_triggers": false,
+          "fingerprinting": false
+        },
+        "urlscan_results": {
+          "submitted": true,
+          "scan_id": "019b8494-eb6b-7522-841b-1f2075ed479f",
+          "result_url": "https://urlscan.io/result/019b8494-eb6b-7522-841b-1f2075ed479f/"
+        }
+      },
+      "threat_score": 0.1,
+      "is_malicious": false,
+      "warnings": [],
+      "details": []
+    }
+  }
+}
