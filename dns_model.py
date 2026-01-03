@@ -1,381 +1,1014 @@
 import os
 import re
-import json
-import time
 import random
 import logging
 from datetime import datetime
 from urllib.parse import urlparse
-from collections import Counter
 import ipaddress
-
+import numpy as np
 import pandas as pd
 import requests
-import tldextract
 import whois
 import dns.resolver
-
 import torch
-from datasets import Dataset
-from sklearn.metrics import accuracy_score, f1_score
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from collections import Counter
+import math
+import json
 
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    Trainer,
-    DataCollatorWithPadding,
-)
-from peft import LoraConfig, get_peft_model, PeftModel
+# Configuration
+MODEL_DIR = "./dns_model"  # Single directory for everything
+BASE_MODEL_PATH = os.path.join(MODEL_DIR, "base_model.pt")
+LORA_ADAPTER_PATH = os.path.join(MODEL_DIR, "lora_adapter.pt")
+MERGED_MODEL_PATH = os.path.join(MODEL_DIR, "merged_model.pt")
+TRAINING_HISTORY_PATH = os.path.join(MODEL_DIR, "training_history.json")
+FEED_ARCHIVE_DIR = os.path.join(MODEL_DIR, "feed_snapshots")
+BLOCKLIST_PATH = os.path.join(MODEL_DIR, "domain_blocklist.txt")
 
-
-
-BASE_MODEL = "distilbert-base-uncased"
-MODEL_DIR = "./dns_model_peft"                 
-MERGED_MODEL_DIR = "./dns_model_merged"       
-BLOCKLIST_PATH = "domain_blocklist.txt"
 BENIGN_URL = "https://tranco-list.eu/top-1m.csv.zip"
 MALICIOUS_FEEDS = [
     "https://urlhaus.abuse.ch/downloads/text/",
     "https://phishunt.io/feed.txt"
 ]
 
-
-DEFAULT_BATCH = 16
-GRAD_ACCUM_STEPS = 2
-EPOCHS = 10
-LR = 5e-5
-MAX_LENGTH = 32
-SEED = 42
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-FEED_ARCHIVE_DIR = "./dns_feeds"
 MAX_FEED_HISTORY = 5
 
+# LoRA hyperparameters
+LORA_R = 8  # Rank
+LORA_ALPHA = 16  # Scaling factor
+LORA_DROPOUT = 0.1
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("dns_peft")
-
-RE_IP_LIKE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-RE_PUNY = re.compile(r"xn--", re.I)
-RE_LONG_LABEL = re.compile(r"[a-z0-9-]{24,}", re.I)
-RE_RANDOM_CHARS = re.compile(r"[a-z]{4,}\d{3,}|[0-9]{4,}[a-z]{4,}", re.I)
-RE_NON_ASCII = re.compile(r"[^\x00-\x7F]")
-RE_MIXED_CASE = re.compile(r"(?=.*[a-z])(?=.*[A-Z])")
-
-def regex_heuristics(domain: str):
-    matches = []
-    if RE_IP_LIKE.search(domain): matches.append("ip_like")
-    if RE_PUNY.search(domain): matches.append("punycode")
-    if RE_LONG_LABEL.search(domain): matches.append("long_label")
-    if RE_RANDOM_CHARS.search(domain): matches.append("random_alphanumeric")
-    if RE_NON_ASCII.search(domain): matches.append("non_ascii")
-    if RE_MIXED_CASE.search(domain): matches.append("mixed_case")
-    return matches
+logger = logging.getLogger("dns_security_peft")
 
 
-def get_whois_age(domain: str, fallback=None):
-    """Return age in days or None on error."""
-    try:
-        w = whois.whois(domain)
-        cdate = w.creation_date
-        if isinstance(cdate, list):
-            cdate = cdate[0] if cdate else None
-        if not cdate:
-            return fallback
-        return (datetime.utcnow() - cdate).days
-    except Exception:
-        return fallback
+class LoRALayer(nn.Module):
+    """
+    LoRA (Low-Rank Adaptation) layer for parameter-efficient fine-tuning
+    Decomposes weight updates into low-rank matrices: ΔW = BA where B is r×d, A is d×r
+    """
+    def __init__(self, in_features, out_features, rank=8, alpha=16, dropout=0.1):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA matrices (frozen during base training)
+        self.lora_A = nn.Parameter(torch.zeros(in_features, rank))
+        self.lora_B = nn.Parameter(torch.zeros(rank, out_features))
+        self.lora_dropout = nn.Dropout(dropout)
+        
+        # Initialize A with kaiming uniform, B with zeros
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        
+    def forward(self, x):
+        # LoRA forward: x @ (A @ B) * scaling
+        return (self.lora_dropout(x) @ self.lora_A @ self.lora_B) * self.scaling
 
-def passive_dns_info(domain: str):
-    """Return some lightweight PDNS info (num ips, ns_count). Exceptions return zeros."""
-    try:
-        ips = set()
-        try:
-            answers = dns.resolver.resolve(domain, "A", lifetime=3.0)
-            ips.update([rdata.address for rdata in answers])
-        except Exception:
-            pass
-        ns_count = 0
-        try:
-            ns = dns.resolver.resolve(domain, "NS", lifetime=3.0)
-            ns_count = len(ns)
-        except Exception:
-            ns_count = 0
-        return {"num_ips": len(ips), "ns_count": ns_count, "ips": sorted(list(ips))}
-    except Exception:
-        return {"num_ips": 0, "ns_count": 0, "ips": []}
+
+class LoRALinear(nn.Module):
+    """Linear layer with LoRA adapter"""
+    def __init__(self, linear_layer, rank=8, alpha=16, dropout=0.1):
+        super().__init__()
+        self.linear = linear_layer
+        self.lora = LoRALayer(
+            linear_layer.in_features,
+            linear_layer.out_features,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout
+        )
+        
+    def forward(self, x):
+        # Combine frozen linear with LoRA adapter
+        return self.linear(x) + self.lora(x)
+
+
+class DomainFeatureExtractor:
+    """Extract comprehensive features from domain names"""
     
+    def __init__(self):
+        self.char_to_idx = {c: i+1 for i, c in enumerate('abcdefghijklmnopqrstuvwxyz0123456789-._')}
+        self.max_domain_len = 253
+        self.max_label_len = 63
+        
+        # Common TLDs for encoding
+        self.common_tlds = ['com', 'net', 'org', 'edu', 'gov', 'mil', 'int', 'io', 'co', 
+                           'uk', 'de', 'jp', 'fr', 'au', 'us', 'ru', 'ch', 'it', 'nl', 'se','in']
+        self.tld_to_idx = {tld: i for i, tld in enumerate(self.common_tlds)}
+        
+    def extract_statistical_features(self, domain):
+        """Extract statistical features from domain"""
+        features = []
+        
+        # Basic length features (2)
+        features.append(len(domain))
+        features.append(domain.count('.'))
+        
+        # Label analysis (4)
+        labels = domain.split('.')
+        features.append(len(labels))
+        features.append(max(len(l) for l in labels) if labels else 0)
+        features.append(sum(len(l) for l in labels) / len(labels) if labels else 0)
+        features.append(np.std([len(l) for l in labels]) if len(labels) > 1 else 0)
+        
+        # Character type ratios (3)
+        alpha_count = sum(c.isalpha() for c in domain)
+        digit_count = sum(c.isdigit() for c in domain)
+        special_count = sum(c in '-_.' for c in domain)
+        total_chars = len(domain)
+        
+        features.extend([
+            alpha_count / total_chars if total_chars > 0 else 0,
+            digit_count / total_chars if total_chars > 0 else 0,
+            special_count / total_chars if total_chars > 0 else 0,
+        ])
+        
+        # Entropy calculation (1)
+        if domain:
+            freq = Counter(domain)
+            entropy = -sum((count/len(domain)) * math.log2(count/len(domain)) 
+                          for count in freq.values())
+            features.append(entropy)
+        else:
+            features.append(0)
+        
+        # Consecutive character patterns (2)
+        max_consecutive_digits = max((len(list(g)) for k, g in 
+                                     __import__('itertools').groupby(domain) if k.isdigit()), 
+                                    default=0)
+        max_consecutive_consonants = 0
+        vowels = set('aeiou')
+        consonants = set('bcdfghjklmnpqrstvwxyz')
+        current_consonants = 0
+        for c in domain.lower():
+            if c in consonants:
+                current_consonants += 1
+                max_consecutive_consonants = max(max_consecutive_consonants, current_consonants)
+            else:
+                current_consonants = 0
+        
+        features.extend([max_consecutive_digits, max_consecutive_consonants])
+        
+        # Vowel/consonant ratio (1)
+        vowel_count = sum(c in vowels for c in domain.lower())
+        consonant_count = sum(c in consonants for c in domain.lower())
+        features.append(vowel_count / (consonant_count + 1))
+        
+        # Hex pattern (1)
+        hex_chars = sum(c in '0123456789abcdef' for c in domain.lower())
+        features.append(hex_chars / total_chars if total_chars > 0 else 0)
+        
+        # TLD features (2)
+        tld = labels[-1] if labels else ''
+        features.append(self.tld_to_idx.get(tld, len(self.common_tlds)))
+        features.append(1 if len(tld) > 4 else 0)  # Unusual TLD length
+        
+        # Subdomain depth (1)
+        features.append(min(len(labels) - 2, 5))  # Cap at 5 for normalization
+        
+        # Heuristic flags (4)
+        features.append(1 if re.search(r'xn--', domain, re.I) else 0)  # Punycode
+        features.append(1 if re.search(r'\d{1,3}(\.\d{1,3}){3}', domain) else 0)  # IP-like
+        features.append(1 if re.search(r'[a-z]{4,}\d{3,}|\d{4,}[a-z]{4,}', domain, re.I) else 0)  # Random pattern
+        features.append(1 if any(len(l) > 20 for l in labels) else 0)  # Long label
+        
+        # Total: 2+4+3+1+2+1+1+2+1+4 = 21 features
+        return np.array(features, dtype=np.float32)
+    
+    def domain_to_sequence(self, domain, max_len=100):
+        """Convert domain to character sequence"""
+        seq = [self.char_to_idx.get(c.lower(), 0) for c in domain[:max_len]]
+        # Pad or truncate
+        if len(seq) < max_len:
+            seq += [0] * (max_len - len(seq))
+        return np.array(seq[:max_len], dtype=np.int64)
+
+
+class DNSDataset(Dataset):
+    """PyTorch Dataset for DNS domain classification"""
+    
+    def __init__(self, domains, labels, feature_extractor):
+        self.domains = domains
+        self.labels = labels
+        self.feature_extractor = feature_extractor
+        
+    def __len__(self):
+        return len(self.domains)
+    
+    def __getitem__(self, idx):
+        domain = self.domains[idx]
+        label = self.labels[idx]
+        
+        # Extract features
+        stat_features = self.feature_extractor.extract_statistical_features(domain)
+        seq_features = self.feature_extractor.domain_to_sequence(domain)
+        
+        return {
+            'statistical': torch.FloatTensor(stat_features),
+            'sequence': torch.LongTensor(seq_features),
+            'label': torch.LongTensor([label])
+        }
+
+
+class DNSSecurityModel(nn.Module):
+    """
+    Hybrid architecture combining:
+    1. CNN for character-level patterns
+    2. Statistical feature processing
+    3. LoRA adapters for efficient fine-tuning
+    """
+    
+    def __init__(self, vocab_size=40, embedding_dim=32, num_filters=128, 
+                 stat_features=21, hidden_dim=256, dropout=0.3, use_lora=False,
+                 lora_r=8, lora_alpha=16, lora_dropout=0.1):
+        super(DNSSecurityModel, self).__init__()
+        
+        self.use_lora = use_lora
+        
+        # Character embedding layer (not adapted with LoRA - relatively small)
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        
+        # Multi-scale CNN for character patterns
+        self.conv1 = nn.Conv1d(embedding_dim, num_filters, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(embedding_dim, num_filters, kernel_size=5, padding=2)
+        self.conv3 = nn.Conv1d(embedding_dim, num_filters, kernel_size=7, padding=3)
+        
+        # Batch normalization
+        self.bn1 = nn.BatchNorm1d(num_filters * 3)
+        
+        # Statistical feature processing with LoRA
+        self.stat_fc1 = nn.Linear(stat_features, 128)
+        self.stat_bn = nn.BatchNorm1d(128)
+        self.stat_fc2 = nn.Linear(128, 64)
+        
+        # Combined processing with LoRA on larger layers
+        self.fc1 = nn.Linear(num_filters * 3 + 64, hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.bn3 = nn.BatchNorm1d(hidden_dim // 2)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        self.fc3 = nn.Linear(hidden_dim // 2, 2)
+        
+        self.relu = nn.ReLU()
+        
+        # Store original layers for LoRA wrapping
+        self.lora_layers = []
+        
+        if use_lora:
+            self._apply_lora(lora_r, lora_alpha, lora_dropout)
+    
+    def _apply_lora(self, rank, alpha, dropout):
+        """Apply LoRA adapters to linear layers"""
+        # Wrap large linear layers with LoRA
+        self.stat_fc1 = LoRALinear(self.stat_fc1, rank, alpha, dropout)
+        self.stat_fc2 = LoRALinear(self.stat_fc2, rank, alpha, dropout)
+        self.fc1 = LoRALinear(self.fc1, rank, alpha, dropout)
+        self.fc2 = LoRALinear(self.fc2, rank, alpha, dropout)
+        self.fc3 = LoRALinear(self.fc3, rank, alpha, dropout)
+        
+        self.lora_layers = [self.stat_fc1, self.stat_fc2, self.fc1, self.fc2, self.fc3]
+        
+        logger.info("LoRA adapters applied to model")
+    
+    def freeze_base_model(self):
+        """Freeze all parameters except LoRA adapters"""
+        for name, param in self.named_parameters():
+            if 'lora' not in name:
+                param.requires_grad = False
+        
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        logger.info(f"Trainable params: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+    
+    def merge_lora_weights(self):
+        """Merge LoRA weights into base model (for inference optimization)"""
+        if not self.use_lora:
+            return
+        
+        for layer in self.lora_layers:
+            if isinstance(layer, LoRALinear):
+                # Merge: W_new = W_base + scaling * (B @ A)
+                lora_weight = (layer.lora.lora_A @ layer.lora.lora_B) * layer.lora.scaling
+                layer.linear.weight.data += lora_weight.T
+                
+        logger.info("LoRA weights merged into base model")
+    
+    def forward(self, sequence, statistical):
+        # Process sequence through embedding
+        embedded = self.embedding(sequence)
+        embedded = embedded.transpose(1, 2)
+        
+        # Multi-scale convolutions
+        conv1_out = self.relu(self.conv1(embedded))
+        conv2_out = self.relu(self.conv2(embedded))
+        conv3_out = self.relu(self.conv3(embedded))
+        
+        # Concatenate multi-scale features
+        conv_out = torch.cat([conv1_out, conv2_out, conv3_out], dim=1)
+        conv_out = self.bn1(conv_out)
+        
+        # Global max pooling
+        pooled = torch.max(conv_out, dim=2)[0]
+        
+        # Process statistical features
+        stat_out = self.relu(self.stat_bn(self.stat_fc1(statistical)))
+        stat_out = self.relu(self.stat_fc2(stat_out))
+        
+        # Combine features
+        combined = torch.cat([pooled, stat_out], dim=1)
+        
+        # Final classification layers
+        x = self.dropout1(self.relu(self.bn2(self.fc1(combined))))
+        x = self.dropout2(self.relu(self.bn3(self.fc2(x))))
+        logits = self.fc3(x)
+        
+        return logits
+
+
+class TrainingHistory:
+    """Track training history and seen domains"""
+    def __init__(self, path=TRAINING_HISTORY_PATH):
+        self.path = path
+        self.history = self._load()
+    
+    def _load(self):
+        if os.path.exists(self.path):
+            with open(self.path, 'r') as f:
+                return json.load(f)
+        return {
+            'seen_domains': set(),
+            'training_runs': [],
+            'total_samples_trained': 0
+        }
+    
+    def save(self):
+        # Convert set to list for JSON serialization
+        data = self.history.copy()
+        data['seen_domains'] = list(data['seen_domains'])
+        with open(self.path, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def add_training_run(self, benign_count, malicious_count, metrics, is_incremental):
+        self.history['training_runs'].append({
+            'timestamp': datetime.now().isoformat(),
+            'benign_samples': benign_count,
+            'malicious_samples': malicious_count,
+            'metrics': metrics,
+            'is_incremental': is_incremental
+        })
+        self.history['total_samples_trained'] += (benign_count + malicious_count)
+    
+    def add_seen_domains(self, domains):
+        if isinstance(self.history['seen_domains'], list):
+            self.history['seen_domains'] = set(self.history['seen_domains'])
+        self.history['seen_domains'].update(domains)
+    
+    def get_unseen_domains(self, domains):
+        if isinstance(self.history['seen_domains'], list):
+            self.history['seen_domains'] = set(self.history['seen_domains'])
+        return [d for d in domains if d not in self.history['seen_domains']]
+
+
 def fetch_tranco(limit=100000):
-    """Return list of top domains from Tranco (may be slow)."""
+    """Fetch benign domains from Tranco"""
     try:
         df = pd.read_csv(BENIGN_URL, compression="zip", header=None, names=["rank", "domain"])
         return df["domain"].head(limit).astype(str).tolist()
     except Exception as e:
-        logger.warning("Tranco fetch failed: %s — falling back to synthetic benigns", e)
-        words = ["home","login","account","cdn","service","api","static","docs","secure","portal"]
-        tlds = ["com","net","org","io","dev"]
-        out = []
-        for _ in range(min(limit, 20000)):
-            out.append(random.choice(words) + random.choice(words) + str(random.randint(0,99)) + "." + random.choice(tlds))
-        return out
+        logger.warning(f"Tranco fetch failed: {e} — using fallback")
+        words = ["home","login","account","cdn","service","api","static","docs","secure","portal",
+                "mail", "shop", "store", "blog", "news", "support", "help", "app"]
+        tlds = ["com","net","org","io","dev","co.uk"]
+        return [f"{random.choice(words)}{random.choice(words)}.{random.choice(tlds)}" 
+                for _ in range(min(limit, 20000))]
 
 
 def fetch_threat_feeds():
-    """Fetch malicious hostnames from simple feeds (deduplicated, skip IPs)."""
+    """Fetch malicious domains from threat feeds"""
     malicious = set()
-
+    
     for feed in MALICIOUS_FEEDS:
         try:
             r = requests.get(feed, timeout=15)
             if r.status_code != 200:
                 continue
-
+            
             for line in r.text.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-
+                
                 try:
                     parsed = urlparse(line if "://" in line else f"http://{line}")
                     host = parsed.hostname
                     if not host:
                         continue
-
+                    
                     host = host.lower().rstrip(".")
-
+                    
+                    # Skip IPs
                     try:
                         ipaddress.ip_address(host)
-                        continue  
+                        continue
                     except ValueError:
-                        pass  
-
+                        pass
+                    
                     malicious.add(host)
-
+                    
                 except Exception:
                     continue
-
+                    
         except Exception as e:
-            logger.debug("feed fetch error %s: %s", feed, e)
+            logger.debug(f"Feed fetch error {feed}: {e}")
             continue
-
+    
     return list(malicious)
 
 
-def make_dataset(benign, malicious, max_examples=None):
-    """Create a HuggingFace Dataset with 'text' and 'label' fields."""
-    max_example = len(benign) if len(benign) > len(malicious) else len(malicious)
-    max_example = max_examples if max_examples != None and max_examples < max_example else max_example
-    benign = benign[:max_example-1]
-    malicious = malicious[:max_example - 1]
-    rows = []
-    for d in benign:
-        rows.append({"text": f"domain: {d}", "label": 0})
-    for d in malicious:
-        rows.append({"text": f"domain: {d}", "label": 1})
-    random.shuffle(rows)
-    df = pd.DataFrame(rows)
-    return Dataset.from_pandas(df)
-
 def save_feed_snapshot(benign_list, malicious_list):
-    """
-    Save benign and malicious domain lists as timestamped CSV files
-    and keep only the last MAX_FEED_HISTORY snapshots.
-    """
+    """Save domain lists as timestamped snapshots"""
     os.makedirs(FEED_ARCHIVE_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
+    
     benign_path = os.path.join(FEED_ARCHIVE_DIR, f"benign_{ts}.csv")
     malicious_path = os.path.join(FEED_ARCHIVE_DIR, f"malicious_{ts}.csv")
-
+    
     pd.DataFrame(benign_list, columns=["domain"]).to_csv(benign_path, index=False)
     pd.DataFrame(malicious_list, columns=["domain"]).to_csv(malicious_path, index=False)
-
-
+    
+    # Keep only recent snapshots
     all_files = sorted(
         [f for f in os.listdir(FEED_ARCHIVE_DIR) if f.endswith(".csv")],
         key=lambda f: os.path.getmtime(os.path.join(FEED_ARCHIVE_DIR, f)),
         reverse=True,
     )
-
-    for old in all_files[MAX_FEED_HISTORY * 2:]: 
-        os.remove(os.path.join(FEED_ARCHIVE_DIR, old))
-
-    print(f"[+] Saved new feed snapshot — benign: {benign_path}, malicious: {malicious_path}")
     
-def compute_metrics(pred):
-    labels = pred.label_ids
-    preds = pred.predictions.argmax(-1)
-    acc = accuracy_score(labels, preds)
-    f1 = f1_score(labels, preds, zero_division=0)
-    return {"accuracy": acc, "f1": f1}
+    for old in all_files[MAX_FEED_HISTORY * 2:]:
+        os.remove(os.path.join(FEED_ARCHIVE_DIR, old))
+    
+    logger.info(f"Saved feed snapshot — benign: {benign_path}, malicious: {malicious_path}")
 
 
-def init_peft_model(base_model_name=BASE_MODEL, lora_r=8, lora_alpha=16, lora_dropout=0.1, target_modules=None):
-    logger.info("Initializing tokenizer and base model: %s", base_model_name)
-    if os.path.exists(MERGED_MODEL_DIR) and os.listdir(MERGED_MODEL_DIR):
-        print("[*] Loading existing PEFT model for incremental update...")
-        tokenizer = AutoTokenizer.from_pretrained(MERGED_MODEL_DIR)
-        base_model = AutoModelForSequenceClassification.from_pretrained(MERGED_MODEL_DIR)
-    else:
-        print("[*] No existing model found, initializing from base DistilBERT...")
-        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-        base_model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2)
-    if target_modules is None:
-        target_modules = ["q_lin", "v_lin"]
-    peft_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=target_modules,
-        lora_dropout=lora_dropout,
-        bias="none",
-        task_type="SEQ_CLS",
-    )
-    model = get_peft_model(base_model, peft_config)
-    model.print_trainable_parameters()
-    model.to(DEVICE)
-    return tokenizer, model
-
-
-
-def save_peft_and_merged(model, tokenizer, model_dir=MODEL_DIR, merged_dir=MERGED_MODEL_DIR):
-    """Save adapter (PEFT) and also save a merged version for inference without PEFT."""
-    os.makedirs(model_dir, exist_ok=True)
-    logger.info("Saving PEFT adapter to %s", model_dir)
-    model.save_pretrained(model_dir)
-    tokenizer.save_pretrained(model_dir)
-    # try:
-    if isinstance(model, PeftModel):
-        logger.info("Merging LoRA adapters into base model for merged export...")
-        merged = model.merge_and_unload()  
-        os.makedirs(merged_dir, exist_ok=True)
-        merged.save_pretrained(merged_dir)
-        tokenizer.save_pretrained(merged_dir)
-        logger.info("Merged model exported to %s", merged_dir)
-    else:
-        logger.info("Model is not PeftModel; skipping merge step.")
-    # except Exception as e:
-    #     logger.warning("Failed to create merged model: %s", e)
-
-def update_model(
-    batch_size=DEFAULT_BATCH,
-    grad_accum=GRAD_ACCUM_STEPS,
-    epochs=EPOCHS,
-    max_examples_per_class=20000
-):
-    """Main function to fetch feeds and fine-tune (LoRA)."""
-    logger.info("Starting update_model() — fetching data...")
-    benign = fetch_tranco(limit=max_examples_per_class*2)
+def train_base_model(epochs=25, batch_size=64, learning_rate=0.001, max_samples=50000):
+    """Train the base DNS security model (full training, no LoRA)"""
+    logger.info("=" * 60)
+    logger.info("TRAINING BASE MODEL (Full Parameters)")
+    logger.info("=" * 60)
+    
+    # Create model directory
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(FEED_ARCHIVE_DIR, exist_ok=True)
+    
+    benign = fetch_tranco(limit=max_samples)
     malicious = fetch_threat_feeds()
     
     save_feed_snapshot(benign, malicious)
-
-    if len(malicious) == 0:
-        logger.warning("No malicious domains found from feeds; aborting update")
-        return None, None
-
-    ds = make_dataset(benign[:max_examples_per_class], malicious[:max_examples_per_class])
-
-    tokenizer, model = init_peft_model()
-    def tokenize_fn(batch):
-        return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-    remove_cols = [c for c in ["text", "__index_level_0__"] if c in ds.column_names]
-    tokenized = ds.map(tokenize_fn, batched=True, remove_columns=remove_cols, load_from_cache_file=False)
-    tokenized = tokenized.rename_column("label", "labels")
-    tokenized.set_format(type="torch")
-
-    split = tokenized.train_test_split(test_size=0.1, seed=SEED)
-    train_dataset = split["train"]
-    eval_dataset = split["test"]
-
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-    args = TrainingArguments(
-        output_dir="./results",
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=grad_accum,
-        num_train_epochs=epochs,
-        eval_strategy="epoch",
-        save_strategy="no",
-        learning_rate=LR,
-        logging_dir="./logs",
-        logging_strategy="epoch",
-        seed=SEED,
-        remove_unused_columns=False
+    
+    if len(malicious) < 100:
+        logger.error("Insufficient malicious samples")
+        return None
+    
+    # Balance dataset
+    min_samples = min(len(benign), len(malicious), max_samples)
+    benign = random.sample(benign, min_samples)
+    malicious = random.sample(malicious, min_samples)
+    
+    # Prepare data
+    domains = benign + malicious
+    labels = [0] * len(benign) + [1] * len(malicious)
+    
+    # Split
+    train_domains, val_domains, train_labels, val_labels = train_test_split(
+        domains, labels, test_size=0.15, random_state=42, stratify=labels
     )
+    
+    logger.info(f"Training samples: {len(train_domains)}, Validation samples: {len(val_domains)}")
+    
+    # Create datasets
+    feature_extractor = DomainFeatureExtractor()
+    train_dataset = DNSDataset(train_domains, train_labels, feature_extractor)
+    val_dataset = DNSDataset(val_domains, val_labels, feature_extractor)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    # Initialize model WITHOUT LoRA
+    model = DNSSecurityModel(use_lora=False).to(DEVICE)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=3, factor=0.5)
+    
+    best_f1 = 0
+    patience_counter = 0
+    max_patience = 7
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_loss = 0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            
+            seq = batch['sequence'].to(DEVICE)
+            stat = batch['statistical'].to(DEVICE)
+            labels_batch = batch['label'].squeeze().to(DEVICE)
+            
+            outputs = model(seq, stat)
+            loss = criterion(outputs, labels_batch)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        # Validation
+        model.eval()
+        val_preds = []
+        val_true = []
+        val_probs = []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                seq = batch['sequence'].to(DEVICE)
+                stat = batch['statistical'].to(DEVICE)
+                labels_batch = batch['label'].squeeze().to(DEVICE)
+                
+                outputs = model(seq, stat)
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(outputs, dim=1)
+                
+                val_preds.extend(preds.cpu().numpy())
+                val_true.extend(labels_batch.cpu().numpy())
+                val_probs.extend(probs[:, 1].cpu().numpy())
+        
+        # Metrics
+        accuracy = accuracy_score(val_true, val_preds)
+        f1 = f1_score(val_true, val_preds)
+        precision = precision_score(val_true, val_preds)
+        recall = recall_score(val_true, val_preds)
+        auc = roc_auc_score(val_true, val_probs)
+        
+        logger.info(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss/len(train_loader):.4f} - "
+                   f"Acc: {accuracy:.4f} - F1: {f1:.4f} - Prec: {precision:.4f} - "
+                   f"Rec: {recall:.4f} - AUC: {auc:.4f}")
+        
+        scheduler.step(f1)
+        
+        # Save best model
+        if f1 > best_f1:
+            best_f1 = f1
+            patience_counter = 0
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'feature_extractor': feature_extractor,
+                'metrics': {
+                    'accuracy': accuracy,
+                    'f1': f1,
+                    'precision': precision,
+                    'recall': recall,
+                    'auc': auc
+                }
+            }, BASE_MODEL_PATH)
+            logger.info(f"✓ Saved best BASE model with F1: {f1:.4f}")
+        else:
+            patience_counter += 1
+            if patience_counter >= max_patience:
+                logger.info("Early stopping triggered")
+                break
+    
+    # Save training history
+    history = TrainingHistory()
+    history.add_seen_domains(domains)
+    history.add_training_run(len(benign), len(malicious), {
+        'accuracy': accuracy,
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'auc': auc
+    }, is_incremental=False)
+    history.save()
+    
+    logger.info("=" * 60)
+    logger.info("BASE MODEL TRAINING COMPLETE")
+    logger.info("=" * 60)
+    
+    return model, feature_extractor
 
-    trainer = Trainer(
-        model=model,
-        args=args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics
-    )
 
-    logger.info("Starting training: epochs=%s batch=%s grad_accum=%s fp16=%s", epochs, batch_size, grad_accum, args.fp16)
-    trainer.train()
-    logger.info("Training finished — saving models")
-    save_peft_and_merged(model, tokenizer)
-    return tokenizer, model
-
-def load_model(model_dir=MODEL_DIR, merged_dir=MERGED_MODEL_DIR):
-    """Load the model for inference.
-    Preferred: load merged model (no PEFT dependency) if exists.
-    Fallback: load base model + PeftModel adapter.
+def incremental_update(epochs=5, batch_size=64, learning_rate=0.0001, 
+                       lora_r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT):
     """
-    if os.path.isdir(merged_dir):
-        logger.info("Loading merged model from %s", merged_dir)
-        tokenizer = AutoTokenizer.from_pretrained(merged_dir, use_fast=True)
-        model = AutoModelForSequenceClassification.from_pretrained(merged_dir)
-        model.to(DEVICE)
-        return tokenizer, model
+    Incremental update using LoRA - ONLY trains on NEW domains
+    This is what you run daily!
+    """
+    logger.info("=" * 60)
+    logger.info("INCREMENTAL UPDATE WITH LoRA (Daily Run)")
+    logger.info("=" * 60)
+    
+    # Ensure directories exist
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(FEED_ARCHIVE_DIR, exist_ok=True)
+    
+    # Load training history
+    history = TrainingHistory()
+    
+    # Fetch new data
+    logger.info("Fetching latest threat feeds...")
+    benign = fetch_tranco(limit=100000)
+    malicious = fetch_threat_feeds()
+    
+    # Filter to only NEW domains
+    new_benign = history.get_unseen_domains(benign)
+    new_malicious = history.get_unseen_domains(malicious)
+    
+    logger.info(f"New domains - Benign: {len(new_benign)}, Malicious: {len(new_malicious)}")
+    
+    if len(new_malicious) < 10:
+        logger.warning("Fewer than 10 new malicious domains - skipping update")
+        return None, None
+    
+    save_feed_snapshot(new_benign, new_malicious)
+    
+    # Balance new data
+    min_samples = min(len(new_benign), len(new_malicious), 10000)
+    if min_samples < 10:
+        logger.warning("Insufficient new samples for meaningful update")
+        return None, None
+    
+    new_benign = random.sample(new_benign, min_samples)
+    new_malicious = random.sample(new_malicious, min_samples)
+    
+    domains = new_benign + new_malicious
+    labels = [0] * len(new_benign) + [1] * len(new_malicious)
+    
+    # Split
+    train_domains, val_domains, train_labels, val_labels = train_test_split(
+        domains, labels, test_size=0.15, random_state=42, stratify=labels
+    )
+    
+    logger.info(f"Training on {len(train_domains)} NEW samples")
+    
+    # Load base model
+    if not os.path.exists(BASE_MODEL_PATH):
+        logger.error("Base model not found! Run train_base_model() first")
+        return None, None
+    
+    checkpoint = torch.load(BASE_MODEL_PATH, map_location=DEVICE, weights_only=False)
+    feature_extractor = checkpoint['feature_extractor']
+    
+    # Create model with LoRA
+    model = DNSSecurityModel(
+        use_lora=True, 
+        lora_r=lora_r, 
+        lora_alpha=lora_alpha, 
+        lora_dropout=lora_dropout
+    ).to(DEVICE)
+    
+    # Load base weights
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    
+    # Freeze base model, only train LoRA adapters
+    model.freeze_base_model()
+    
+    # Create datasets
+    train_dataset = DNSDataset(train_domains, train_labels, feature_extractor)
+    val_dataset = DNSDataset(val_domains, val_labels, feature_extractor)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    criterion = nn.CrossEntropyLoss()
+    # Lower learning rate for fine-tuning
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad], 
+        lr=learning_rate, 
+        weight_decay=0.01
+    )
+    
+    best_f1 = 0
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_loss = 0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            
+            seq = batch['sequence'].to(DEVICE)
+            stat = batch['statistical'].to(DEVICE)
+            labels_batch = batch['label'].squeeze().to(DEVICE)
+            
+            outputs = model(seq, stat)
+            loss = criterion(outputs, labels_batch)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        # Validation
+        model.eval()
+        val_preds = []
+        val_true = []
+        val_probs = []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                seq = batch['sequence'].to(DEVICE)
+                stat = batch['statistical'].to(DEVICE)
+                labels_batch = batch['label'].squeeze().to(DEVICE)
+                
+                outputs = model(seq, stat)
+                probs = torch.softmax(outputs, dim=1)
+                preds = torch.argmax(outputs, dim=1)
+                
+                val_preds.extend(preds.cpu().numpy())
+                val_true.extend(labels_batch.cpu().numpy())
+                val_probs.extend(probs[:, 1].cpu().numpy())
+        
+        accuracy = accuracy_score(val_true, val_preds)
+        f1 = f1_score(val_true, val_preds)
+        precision = precision_score(val_true, val_preds)
+        recall = recall_score(val_true, val_preds)
+        auc = roc_auc_score(val_true, val_probs)
+        
+        logger.info(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss/len(train_loader):.4f} - "
+                   f"F1: {f1:.4f} - Prec: {precision:.4f} - Rec: {recall:.4f}")
+        
+        if f1 > best_f1:
+            best_f1 = f1
+    
+    # Save LoRA adapter
+    lora_state = {name: param for name, param in model.named_parameters() if 'lora' in name}
+    torch.save({
+        'lora_state_dict': lora_state,
+        'lora_config': {
+            'rank': lora_r,
+            'alpha': lora_alpha,
+            'dropout': lora_dropout
+        },
+        'feature_extractor': feature_extractor,
+        'metrics': {
+            'accuracy': accuracy,
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'auc': auc
+        }
+    }, LORA_ADAPTER_PATH)
+    
+    logger.info(f"✓ Saved LoRA adapter with F1: {f1:.4f}")
+    
+    # Merge and save for inference
+    logger.info("Merging LoRA weights into base model...")
+    model.merge_lora_weights()
+    
+    # Save merged model (no LoRA dependencies needed for inference)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'feature_extractor': feature_extractor,
+        'metrics': {
+            'accuracy': accuracy,
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'auc': auc
+        }
+    }, MERGED_MODEL_PATH)
+    
+    logger.info(f"✓ Saved merged model to {MERGED_MODEL_PATH}")
+    
+    # Update history
+    history.add_seen_domains(domains)
+    history.add_training_run(len(new_benign), len(new_malicious), {
+        'accuracy': accuracy,
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'auc': auc
+    }, is_incremental=True)
+    history.save()
+    
+    logger.info("=" * 60)
+    logger.info("INCREMENTAL UPDATE COMPLETE")
+    logger.info(f"Total domains seen: {len(history.history['seen_domains'])}")
+    logger.info("=" * 60)
+    
+    return model, feature_extractor
 
 
-    if os.path.isdir(model_dir):
-        logger.info("Loading base model and applying PEFT adapter from %s", model_dir)
-        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
-        base = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=2)
-        model = PeftModel.from_pretrained(base, model_dir)
-        model.to(DEVICE)
-        return tokenizer, model
+def load_model(prefer_merged=True):
+    """Load model for inference"""
+    # Try merged model first (fastest, no LoRA overhead)
+    if prefer_merged and os.path.exists(MERGED_MODEL_PATH):
+        logger.info(f"Loading merged model from {MERGED_MODEL_PATH}")
+        checkpoint = torch.load(MERGED_MODEL_PATH, map_location=DEVICE, weights_only=False)
+        model = DNSSecurityModel(use_lora=False).to(DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        feature_extractor = checkpoint['feature_extractor']
+        logger.info(f"Model loaded with metrics: {checkpoint['metrics']}")
+        return model, feature_extractor
+    
+    # Fall back to base model
+    if os.path.exists(BASE_MODEL_PATH):
+        logger.info(f"Loading base model from {BASE_MODEL_PATH}")
+        checkpoint = torch.load(BASE_MODEL_PATH, map_location=DEVICE, weights_only=False)
+        model = DNSSecurityModel(use_lora=False).to(DEVICE)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        feature_extractor = checkpoint['feature_extractor']
+        logger.info(f"Model loaded with metrics: {checkpoint['metrics']}")
+        return model, feature_extractor
+    
+    raise FileNotFoundError("No trained model found! Run train_base_model() first")
 
-    raise FileNotFoundError("No trained model found in merged_dir or model_dir")
 
-
-def ai_infer(domain, tokenizer, model):
-    text = f"domain: {domain}"
-    tokens = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=MAX_LENGTH).to(DEVICE)
+def predict_domain(domain, model, feature_extractor):
+    """Predict if domain is malicious"""
     model.eval()
+    
+    domain = domain.strip().lower().rstrip(".")
+    
+    stat_features = feature_extractor.extract_statistical_features(domain)
+    seq_features = feature_extractor.domain_to_sequence(domain)
+    
+    stat_tensor = torch.FloatTensor(stat_features).unsqueeze(0).to(DEVICE)
+    seq_tensor = torch.LongTensor(seq_features).unsqueeze(0).to(DEVICE)
+    
     with torch.no_grad():
-        out = model(**tokens)
-        logits = out.logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
-        return float(probs[1])
-
-def dns_action(qname, tokenizer, model,blocklist, ml_threshold=0.9):
+        outputs = model(seq_tensor, stat_tensor)
+        probs = torch.softmax(outputs, dim=1)
+        malicious_prob = probs[0, 1].item()
     
+    return malicious_prob
+
+
+def dns_action(qname, model, feature_extractor, blocklist, ml_threshold=0.7):
+    """Make DNS decision for a query"""
+    qname = qname.strip().lower().rstrip(".")
+    
+    # Check blocklist
     if qname in blocklist:
-        return {"domain" : qname, "decision" : "BLOCKED", "score" : 1.00, "whois_age" : "null", "pdns" : "null", "reason" : "blocklist:domain"}
-    q = qname.strip().lower().rstrip(".")
-    if qname in blocklist:
-        return {"domain" : qname, "decision" : "BLOCKED", "score" : 1.00, "whois_age" : "null", "pdns" : "null", "reason" : "blocklist:domain"}
+        return {
+            "domain": qname,
+            "decision": "BLOCKED",
+            "score": 1.00,
+            "reason": "blocklist:domain"
+        }
     
-    heur = regex_heuristics(q)
-    if heur:
-        return {"domain": q, "decision": "BLOCKED", "score": 0.95, "whois_age": "null", "pdns": "null", "reason": f"regex:{','.join(heur)}"}
-
-    # whois_age = get_whois_age(q)
-    # pdns = passive_dns_info(q)
+    # Basic heuristics
+    if re.search(r'^\d{1,3}(\.\d{1,3}){3}', qname):
+        return {
+            "domain": qname,
+            "decision": "BLOCKED",
+            "score": 0.98,
+            "reason": "heuristic:ip_address"
+        }
     
-    score = ai_infer(q, tokenizer, model)
+    if re.search(r'xn--', qname, re.I):
+        return {
+            "domain": qname,
+            "decision": "BLOCKED",
+            "score": 0.95,
+            "reason": "heuristic:punycode"
+        }
+    
+    # ML prediction
+    try:
+        score = predict_domain(qname, model, feature_extractor)
+        
+        if score >= ml_threshold:
+            decision = "BLOCKED"
+            reason = "ml:malicious"
+        elif score >= ml_threshold * 0.5:
+            decision = "FLAGGED"
+            reason = "ml:suspicious"
+        else:
+            decision = "ALLOWED"
+            reason = "ml:benign"
+        
+        return {
+            "domain": qname,
+            "decision": decision,
+            "score": float(score),
+            "reason": reason
+        }
+    except Exception as e:
+        logger.error(f"Prediction error for {qname}: {e}")
+        return {
+            "domain": qname,
+            "decision": "ALLOWED",
+            "score": 0.0,
+            "reason": "error:fallback_allow"
+        }
 
-    if score >= ml_threshold:
-        decision = "BLOCKED"; reason = "ai_malicious"
-    elif score >= (ml_threshold * 0.6):
-        decision = "ALLOWED"; reason = "ai_suspicious"
+
+# Main execution
+if __name__ == "__main__":
+    import sys
+    
+    # Ensure model directory exists
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
+        
+        if command == "train_base":
+            logger.info("Training base model from scratch...")
+            train_base_model()
+            
+        elif command == "update":
+            logger.info("Running incremental update (daily)...")
+            incremental_update()
+            
+        elif command == "test":
+            logger.info("Testing model...")
+            model, fe = load_model()
+            
+            test_domains = [
+                "google.com",
+                "facebook.com",
+                "xn--80ak6aa92e.com",
+                "secure-login-verify123456.com",
+                "amazon.com",
+                "a8f3d2e9b1c4.tk",
+                "paypal-security-update.info",
+                "microsoft-support.xyz"
+            ]
+            
+            print("\n" + "=" * 70)
+            print("DOMAIN CLASSIFICATION RESULTS")
+            print("=" * 70)
+            for domain in test_domains:
+                result = dns_action(domain, model, fe, set())
+                print(f"{domain:40} -> {result['decision']:8} (score: {result['score']:.3f}) - {result['reason']}")
+            print("=" * 70)
+            
+        elif command == "info":
+            # Show model directory info
+            print("\n" + "=" * 70)
+            print(f"DNS MODEL DIRECTORY: {os.path.abspath(MODEL_DIR)}")
+            print("=" * 70)
+            
+            files = {
+                "Base Model": BASE_MODEL_PATH,
+                "LoRA Adapter": LORA_ADAPTER_PATH,
+                "Merged Model": MERGED_MODEL_PATH,
+                "Training History": TRAINING_HISTORY_PATH,
+                "Feed Snapshots": FEED_ARCHIVE_DIR,
+                "Blocklist": BLOCKLIST_PATH
+            }
+            
+            for name, path in files.items():
+                if os.path.exists(path):
+                    if os.path.isdir(path):
+                        count = len(os.listdir(path))
+                        print(f"✓ {name:20} -> {path} ({count} files)")
+                    else:
+                        size = os.path.getsize(path) / (1024 * 1024)  # MB
+                        print(f"✓ {name:20} -> {path} ({size:.2f} MB)")
+                else:
+                    print(f"✗ {name:20} -> {path} (not found)")
+            
+            # Show training history summary
+            if os.path.exists(TRAINING_HISTORY_PATH):
+                history = TrainingHistory()
+                print("\n" + "-" * 70)
+                print("TRAINING HISTORY:")
+                print(f"  Total domains seen: {len(history.history.get('seen_domains', []))}")
+                print(f"  Training runs: {len(history.history.get('training_runs', []))}")
+                
+                if history.history.get('training_runs'):
+                    last_run = history.history['training_runs'][-1]
+                    print(f"  Last update: {last_run.get('timestamp', 'N/A')}")
+                    print(f"  Last F1 score: {last_run.get('metrics', {}).get('f1', 'N/A'):.4f}")
+                    print(f"  Incremental: {last_run.get('is_incremental', False)}")
+            print("=" * 70 + "\n")
+            
+        else:
+            print(f"Unknown command: {command}")
+            print("Usage:")
+            print("  python dns_model.py train_base  - Train base model (run once)")
+            print("  python dns_model.py update      - Incremental update (run daily)")
+            print("  python dns_model.py test        - Test model")
+            print("  python dns_model.py info        - Show model directory info")
     else:
-        decision = "ALLOWED"; reason = "ai_safe"
-
-    return {"domain": q, "decision": decision, "score": score, "whois_age_days": "null", "pdns": "null", "reason": reason}
+        print("DNS Security Model with LoRA PEFT")
+        print(f"\nModel Directory: {os.path.abspath(MODEL_DIR)}")
+        print("\nUsage:")
+        print("  python dns_model.py train_base  - Train base model (run ONCE initially)")
+        print("  python dns_model.py update      - Incremental update (run DAILY)")
+        print("  python dns_model.py test        - Test model predictions")
+        print("  python dns_model.py info        - Show model directory info")

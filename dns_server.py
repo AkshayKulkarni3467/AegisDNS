@@ -1,24 +1,32 @@
+# dns_server.py
 import socket
 from dnslib import DNSRecord, DNSHeader, RCODE, QTYPE
 import dns.resolver
 from dns_utils import log_request, load_dns_blocklist, load_ip_blocklist
-from dns_model import MERGED_MODEL_DIR, MODEL_DIR,dns_action,load_model,update_model
+from dns_model import dns_action, load_model
 from ip_model import IPFilterSystem
 import time
 
 DNS_BLOCKLIST_FILE = "domain_blocklist.txt"
 IP_BLOCKLIST_FILE = "ip_blocklist.txt"
-tokenizer, model = load_model(MODEL_DIR,MERGED_MODEL_DIR)
+
+# Don't load at import time - load lazily
+model = None
+feature_extractor = None
+
 resolver = dns.resolver.Resolver()
-
-#TODO Change to a database cache
 dns_cache = {}
-
-
 ip_filter = IPFilterSystem()
 
 
-def ip_checker(response,ip_blocklist):
+def _ensure_model_loaded():
+    """Lazy load the model on first use"""
+    global model, feature_extractor
+    if model is None:
+        model, feature_extractor = load_model()
+
+
+def ip_checker(response, ip_blocklist):
     blocked_ip_found = False
     for rdata in response:
         if str(rdata) in ip_blocklist:
@@ -30,11 +38,14 @@ def ip_checker(response,ip_blocklist):
         return "ALLOWED"
         
 
-#TODO Implement static and dynamic qurantine check
 def quarantine_check(reply):
     pass
 
+
 def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False): 
+    global model, feature_extractor
+    _ensure_model_loaded()  # Load model if not already loaded
+    
     client_ip, client_port = addr
     ip_a = "ALLOWED"
     try:
@@ -65,7 +76,7 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             else:
                 del dns_cache[qname]
     
-    dns_a = dns_action(qname,tokenizer,model,blocklist=dns_blocklist,ml_threshold=1.1)
+    dns_a = dns_action(qname, model, feature_extractor, blocklist=dns_blocklist, ml_threshold=0.7)
     
     if dns_a["decision"] == "BLOCKED":
         reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, ra=1, rcode=RCODE.NXDOMAIN))
@@ -78,7 +89,7 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             quarantine_check_result = quarantine_check(reply)
             
                 
-            ip_a = ip_filter.ip_checker(response,ip_blocklist)
+            ip_a = ip_filter.ip_checker(response, ip_blocklist)
 
             
             if ip_a == "BLOCKED":
@@ -95,7 +106,7 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             action = f"FAILED ({e})"
             reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, ra=1, rcode=RCODE.SERVFAIL))
 
-    log_request(client_ip, client_port, qname, f'A : {dns_a["decision"]} ; R : {dns_a["reason"]} ; S : {dns_a["score"]} ; IP : {ip_a}', log_func) 
+    log_request(client_ip, client_port, qname, f'A : {dns_a["decision"]} ; R : {dns_a["reason"]} ; S : {dns_a["score"]:.3f} ; IP : {ip_a}', log_func) 
     
     if reply:
         try:
@@ -103,7 +114,10 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
         except OSError as e:
             log_func(f"Socket error sending reply to {client_ip}:{client_port}: {e}")
             
+
 def start_dns_server(log_func, listen_ip="0.0.0.0", listen_port=6667, upstream_dns="8.8.8.8"):
+    _ensure_model_loaded()  # Load model when server starts
+    
     LISTEN_IP = listen_ip 
     LISTEN_PORT = listen_port
     UPSTREAM_DNS = upstream_dns

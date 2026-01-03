@@ -3,7 +3,7 @@ import threading
 import time
 import dns_controller
 from dns_utils import load_dns_blocklist, load_ip_blocklist, save_blocklist
-from dns_model import update_model
+from dns_model import incremental_update
 from ip_model import IPFilterSystem
 
 # Global state
@@ -408,7 +408,7 @@ def main(page: ft.Page):
         def run_update():
             try:
                 add_log_to_ui("Starting DNS model update...")
-                update_model()
+                incremental_update()
                 update_dns_status.value = "✓ DNS model updated successfully"
                 update_dns_status.color = "green"
                 add_log_to_ui("✓ DNS model updated successfully")
