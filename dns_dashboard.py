@@ -76,7 +76,7 @@ def main(page: ft.Page):
         domain_items_column.controls.clear()
         ip_items_column.controls.clear()
 
-        domains = sorted(list(load_dns_blocklist("domain_blocklist.txt")))
+        domains = sorted(list(load_dns_blocklist("manual_lists/domain_blocklist.txt")))
         if not domains:
             domain_items_column.controls.append(
                 ft.Text("No domains blocked.", color="grey", size=12)
@@ -92,7 +92,7 @@ def main(page: ft.Page):
                     )
                 )
 
-        ips = sorted(list(load_ip_blocklist("ip_blocklist.txt")))
+        ips = sorted(list(load_ip_blocklist("manual_lists/ip_blocklist.txt")))
         if not ips:
             ip_items_column.controls.append(
                 ft.Text("No IPs blocked.", color="grey", size=12)
@@ -278,10 +278,10 @@ def main(page: ft.Page):
     def add_domain(e):
         domain = domain_input.value.strip().lower()
         if domain:
-            domains = load_dns_blocklist("domain_blocklist.txt")
+            domains = load_dns_blocklist("manual_lists/domain_blocklist.txt")
             if domain not in domains:
                 domains.add(domain)
-                save_blocklist("domain_blocklist.txt", domains)
+                save_blocklist("manual_lists/domain_blocklist.txt", domains)
                 add_log_to_ui(f"✓ Added '{domain}' to domain blocklist")
                 update_blocklist_display()
             else:
@@ -340,10 +340,10 @@ def main(page: ft.Page):
     def add_ip(e):
         ip = ip_input.value.strip()
         if ip:
-            ips = load_ip_blocklist("ip_blocklist.txt")
+            ips = load_ip_blocklist("manual_lists/ip_blocklist.txt")
             if ip not in ips:
                 ips.add(ip)
-                save_blocklist("ip_blocklist.txt", ips)
+                save_blocklist("manual_lists/ip_blocklist.txt", ips)
                 add_log_to_ui(f"✓ Added '{ip}' to IP blocklist")
                 update_blocklist_display()
             else:

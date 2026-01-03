@@ -7,8 +7,8 @@ from dns_model import dns_action, load_model
 from ip_model import IPFilterSystem
 import time
 
-DNS_BLOCKLIST_FILE = "domain_blocklist.txt"
-IP_BLOCKLIST_FILE = "ip_blocklist.txt"
+DNS_BLOCKLIST_FILE = "manual_lists/domain_blocklist.txt"
+IP_BLOCKLIST_FILE = "manual_lists/ip_blocklist.txt"
 
 # Don't load at import time - load lazily
 model = None
@@ -76,7 +76,7 @@ def handle_dns_query(data, addr, sock, log_func, is_quarantine_check=False):
             else:
                 del dns_cache[qname]
     
-    dns_a = dns_action(qname, model, feature_extractor, blocklist=dns_blocklist, ml_threshold=0.7)
+    dns_a = dns_action(qname, model, feature_extractor, blocklist=dns_blocklist, ml_threshold=0.998)
     
     if dns_a["decision"] == "BLOCKED":
         reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, ra=1, rcode=RCODE.NXDOMAIN))
