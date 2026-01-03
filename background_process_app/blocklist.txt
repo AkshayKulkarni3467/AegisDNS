@@ -1,0 +1,9 @@
+api.github.com
+monkeytype.com
+striker.com
+scream.com
+cdnjs.cloudflare.com
+mobile.events.microsoft.com
+axis.com
+example.com
+domainwheel.com
