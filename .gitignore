@@ -1,3 +1,4 @@
-dns_model_merged/*
-dns_model_peft/*
+dns_model/*
 results/*
+dns_filter.log
+__pycache__/*

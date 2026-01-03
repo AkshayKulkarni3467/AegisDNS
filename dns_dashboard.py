@@ -1,8 +1,34 @@
 import flet as ft
 import threading
 import time
+import json
+import os
 import dns_controller
 from dns_utils import load_dns_blocklist, load_ip_blocklist, save_blocklist
+
+# Add whitelist functions
+def load_whitelist(filepath="manual_lists/domain_whitelist.txt"):
+    """Load whitelist from file"""
+    whitelist = set()
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    domain = line.strip().lower()
+                    if domain and not domain.startswith('#'):
+                        whitelist.add(domain)
+        except:
+            pass
+    return whitelist
+
+def save_whitelist(filepath, whitelist):
+    """Save whitelist to file"""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("# Whitelisted domains - one per line\n")
+        f.write("# Subdomains are also allowed\n\n")
+        for domain in sorted(whitelist):
+            f.write(f"{domain}\n")
 from dns_model import incremental_update
 from ip_model import IPFilterSystem
 
@@ -10,19 +36,67 @@ from ip_model import IPFilterSystem
 is_filter_running = False
 ip_filter = IPFilterSystem()
 
+# Configuration file for filter settings
+FILTER_CONFIG_PATH = "filter_config.json"
+
+# Default filter configuration
+default_filter_config = {
+    # Core methods
+    "use_whitelist": True,
+    "use_manual_list": True,
+    
+    # Heuristic methods
+    "use_ip_check": True,
+    "use_punycode_check": True,
+    "use_excessive_hyphens": True,
+    "use_long_label": True,
+    "use_hex_string": True,
+    "use_suspicious_tld": True,
+    "use_dga_pattern": True,
+    
+    # ML method
+    "use_ml_model": True,
+    
+    # Thresholds
+    "ml_threshold": 0.85,
+    "suspicious_tld_threshold": 0.6
+}
+
 # UI Components that need global access
 log_viewer_container = ft.Column(controls=[], scroll="auto", expand=True)
 domain_items_column = ft.Column(controls=[], scroll="auto", expand=True)
 ip_items_column = ft.Column(controls=[], scroll="auto", expand=True)
+whitelist_items_column = ft.Column(controls=[], scroll="auto", expand=True)
+
+
+def load_filter_config():
+    """Load filter configuration from file"""
+    if os.path.exists(FILTER_CONFIG_PATH):
+        try:
+            with open(FILTER_CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return default_filter_config.copy()
+
+
+def save_filter_config(config):
+    """Save filter configuration to file"""
+    with open(FILTER_CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=2)
+
 
 def main(page: ft.Page):
     global is_filter_running
 
     page.title = "DNS Filter Dashboard"
-    page.window_width = 1000
-    page.window_height = 700
+    page.window_width = 1200
+    page.window_height = 750
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
+
+    # Load current filter config
+    filter_config = load_filter_config()
 
     # ==================== Utility Functions ====================
     
@@ -72,9 +146,10 @@ def main(page: ft.Page):
             page.update()
 
     def update_blocklist_display():
-        """Refresh the blocklist displays"""
+        """Refresh the blocklist and whitelist displays"""
         domain_items_column.controls.clear()
         ip_items_column.controls.clear()
+        whitelist_items_column.controls.clear()
 
         domains = sorted(list(load_dns_blocklist("manual_lists/domain_blocklist.txt")))
         if not domains:
@@ -108,8 +183,26 @@ def main(page: ft.Page):
                     )
                 )
         
+        # Whitelist display
+        whitelisted = sorted(list(load_whitelist("manual_lists/domain_whitelist.txt")))
+        if not whitelisted:
+            whitelist_items_column.controls.append(
+                ft.Text("No domains whitelisted.", color="grey", size=12)
+            )
+        else:
+            for domain in whitelisted:
+                whitelist_items_column.controls.append(
+                    ft.Container(
+                        content=ft.Text(domain, size=12, color="lightgreen"),
+                        padding=5,
+                        border_radius=5,
+                        bgcolor="#2C2C2C"
+                    )
+                )
+        
         domain_items_column.update()
         ip_items_column.update()
+        whitelist_items_column.update()
 
     # ==================== Tab 1: Control Panel ====================
     
@@ -391,27 +484,163 @@ def main(page: ft.Page):
         expand=True
     )
 
-    # ==================== Tab 5: Model Updates ====================
+    # ==================== Tab 5: Whitelist ====================
+    
+    whitelist_input = ft.TextField(
+        label="Domain to whitelist",
+        hint_text="e.g., mycompany.com",
+        expand=True
+    )
+
+    def add_whitelist(e):
+        domain = whitelist_input.value.strip().lower()
+        if domain:
+            whitelisted = load_whitelist("manual_lists/domain_whitelist.txt")
+            if domain not in whitelisted:
+                whitelisted.add(domain)
+                save_whitelist("manual_lists/domain_whitelist.txt", whitelisted)
+                add_log_to_ui(f"✓ Added '{domain}' to whitelist")
+                update_blocklist_display()
+            else:
+                add_log_to_ui(f"⚠ '{domain}' already in whitelist")
+            whitelist_input.value = ""
+            page.update()
+
+    whitelist_input.on_submit = add_whitelist
+
+    whitelist_tab = ft.Container(
+        content=ft.Column([
+            ft.Text("Domain Whitelist Management", size=20, weight=ft.FontWeight.BOLD),
+            ft.Container(height=10),
+            
+            ft.Text(
+                "Whitelisted domains are ALWAYS allowed, even if detected as malicious",
+                size=11,
+                color="orange",
+                italic=True
+            ),
+            
+            ft.Container(height=10),
+            
+            ft.Row([
+                whitelist_input,
+                ft.IconButton(
+                    icon=ft.Icons.ADD_CIRCLE,
+                    tooltip="Add domain",
+                    on_click=add_whitelist,
+                    icon_color="lightgreen"
+                )
+            ]),
+            
+            ft.Container(height=20),
+            
+            ft.Row([
+                ft.Text(f"Whitelisted Domains", size=16, weight=ft.FontWeight.BOLD, color="lightgreen"),
+                ft.IconButton(
+                    icon=ft.Icons.REFRESH,
+                    tooltip="Refresh list",
+                    on_click=lambda e: update_blocklist_display()
+                )
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            
+            ft.Container(
+                content=whitelist_items_column,
+                bgcolor="#1E1E1E",
+                border_radius=10,
+                padding=10,
+                expand=True
+            )
+        ], expand=True),
+        padding=20,
+        expand=True
+    )
+
+    # ==================== Tab 6: Model Updates ====================
     
     update_dns_progress = ft.ProgressBar(visible=False)
     update_ip_progress = ft.ProgressBar(visible=False)
     
     update_dns_status = ft.Text("", size=12)
     update_ip_status = ft.Text("", size=12)
+    
+    # Training parameters
+    epochs_input = ft.TextField(
+        label="Epochs",
+        value="5",
+        width=100,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="Number of training epochs (default: 5)"
+    )
+    
+    batch_size_input = ft.TextField(
+        label="Batch Size",
+        value="64",
+        width=100,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="Training batch size (default: 64)"
+    )
+    
+    learning_rate_input = ft.TextField(
+        label="Learning Rate",
+        value="0.0001",
+        width=120,
+        tooltip="Learning rate for optimizer (default: 0.0001)"
+    )
+    
+    lora_rank_input = ft.TextField(
+        label="LoRA Rank",
+        value="8",
+        width=100,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="LoRA rank parameter (default: 8)"
+    )
+    
+    lora_alpha_input = ft.TextField(
+        label="LoRA Alpha",
+        value="16",
+        width=100,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        tooltip="LoRA alpha scaling (default: 16)"
+    )
 
     def update_dns_model(e):
         update_dns_progress.visible = True
-        update_dns_status.value = "Updating DNS model..."
+        update_dns_status.value = "Updating DNS model with new domains (LoRA)..."
         update_dns_status.color = "blue"
         page.update()
         
         def run_update():
             try:
-                add_log_to_ui("Starting DNS model update...")
-                incremental_update()
-                update_dns_status.value = "✓ DNS model updated successfully"
-                update_dns_status.color = "green"
-                add_log_to_ui("✓ DNS model updated successfully")
+                # Parse parameters
+                epochs = int(epochs_input.value) if epochs_input.value else 5
+                batch_size = int(batch_size_input.value) if batch_size_input.value else 64
+                lr = float(learning_rate_input.value) if learning_rate_input.value else 0.0001
+                lora_r = int(lora_rank_input.value) if lora_rank_input.value else 8
+                lora_alpha = int(lora_alpha_input.value) if lora_alpha_input.value else 16
+                
+                add_log_to_ui(f"Starting DNS model update with params: epochs={epochs}, batch={batch_size}, lr={lr}")
+                
+                # Run incremental update with custom parameters
+                result = incremental_update(
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    learning_rate=lr,
+                    lora_r=lora_r,
+                    lora_alpha=lora_alpha
+                )
+                
+                if result is None or result[0] is None:
+                    update_dns_status.value = "⚠ No new domains to train on"
+                    update_dns_status.color = "orange"
+                    add_log_to_ui("⚠ DNS model update skipped - no new domains")
+                else:
+                    update_dns_status.value = "✓ DNS model updated successfully (LoRA)"
+                    update_dns_status.color = "green"
+                    add_log_to_ui("✓ DNS model updated successfully with LoRA")
+            except ValueError as ve:
+                update_dns_status.value = f"✗ Invalid parameter: {str(ve)}"
+                update_dns_status.color = "red"
+                add_log_to_ui(f"✗ Invalid training parameter: {ve}")
             except Exception as ex:
                 update_dns_status.value = f"✗ Update failed: {str(ex)}"
                 update_dns_status.color = "red"
@@ -451,25 +680,47 @@ def main(page: ft.Page):
             ft.Text("Model & Data Updates", size=20, weight=ft.FontWeight.BOLD),
             ft.Container(height=20),
             
-            # DNS Model Update
+            # DNS Model Update with Parameters
             ft.Container(
                 content=ft.Column([
                     ft.Row([
                         ft.Icon(ft.Icons.MODEL_TRAINING, size=24),
-                        ft.Text("DNS Model Update", size=16, weight=ft.FontWeight.BOLD)
+                        ft.Text("DNS Model Incremental Update", size=16, weight=ft.FontWeight.BOLD)
                     ], spacing=10),
                     ft.Divider(),
                     ft.Text(
-                        "Update the machine learning model for DNS filtering",
+                        "Update ML model with NEW domains using LoRA (fast, efficient)",
                         size=12,
                         color="grey"
                     ),
-                    ft.Container(height=10),
+                    ft.Text(
+                        "Only trains on domains not seen before",
+                        size=10,
+                        color="grey",
+                        italic=True
+                    ),
+                    ft.Container(height=15),
+                    
+                    # Training Parameters
+                    ft.Text("Training Parameters:", size=13, weight=ft.FontWeight.BOLD),
+                    ft.Container(height=5),
+                    ft.Row([
+                        epochs_input,
+                        batch_size_input,
+                        learning_rate_input
+                    ], spacing=10),
+                    ft.Container(height=5),
+                    ft.Row([
+                        lora_rank_input,
+                        lora_alpha_input
+                    ], spacing=10),
+                    
+                    ft.Container(height=15),
                     ft.ElevatedButton(
-                        "Update DNS Model",
+                        "Update DNS Model (LoRA)",
                         icon=ft.Icons.DOWNLOAD,
                         on_click=update_dns_model,
-                        width=200
+                        width=220
                     ),
                     update_dns_progress,
                     update_dns_status
@@ -508,7 +759,289 @@ def main(page: ft.Page):
                 padding=20,
                 border_radius=10
             )
-        ]),
+        ], scroll="auto"),
+        padding=20,
+        expand=True
+    )
+
+    # ==================== Tab 7: Settings ====================
+    
+    # Filter method checkboxes - organized by category
+    
+    # Core Methods
+    use_whitelist_check = ft.Checkbox(
+        label="Use Whitelist",
+        value=filter_config.get("use_whitelist", True),
+        tooltip="Check against known legitimate domains (Google, Microsoft, etc.)"
+    )
+    
+    use_manual_list_check = ft.Checkbox(
+        label="Use Manual Blocklist",
+        value=filter_config.get("use_manual_list", True),
+        tooltip="Check domains against your manual blocklist"
+    )
+    
+    # Heuristic Methods
+    use_ip_check = ft.Checkbox(
+        label="Block IP Addresses",
+        value=filter_config.get("use_ip_check", True),
+        tooltip="Block direct IP address queries (e.g., 192.168.1.1)"
+    )
+    
+    use_punycode_check = ft.Checkbox(
+        label="Block Punycode Domains",
+        value=filter_config.get("use_punycode_check", True),
+        tooltip="Block internationalized domains (often used in phishing)"
+    )
+    
+    use_excessive_hyphens = ft.Checkbox(
+        label="Block Excessive Hyphens",
+        value=filter_config.get("use_excessive_hyphens", True),
+        tooltip="Block domains with more than 3 hyphens (DGA indicator)"
+    )
+    
+    use_long_label = ft.Checkbox(
+        label="Block Long Labels",
+        value=filter_config.get("use_long_label", True),
+        tooltip="Block domains with labels longer than 30 characters"
+    )
+    
+    use_hex_string = ft.Checkbox(
+        label="Block Hex Strings",
+        value=filter_config.get("use_hex_string", True),
+        tooltip="Block domains with 32+ consecutive hex characters"
+    )
+    
+    use_suspicious_tld = ft.Checkbox(
+        label="Flag Suspicious TLDs",
+        value=filter_config.get("use_suspicious_tld", True),
+        tooltip="Lower ML threshold for .tk, .ml, .ga, .cf, .gq, etc."
+    )
+    
+    use_dga_pattern = ft.Checkbox(
+        label="Detect DGA Patterns",
+        value=filter_config.get("use_dga_pattern", True),
+        tooltip="Block domains with alternating consonant/vowel patterns"
+    )
+    
+    # ML Method
+    use_ml_model_check = ft.Checkbox(
+        label="Use ML Model",
+        value=filter_config.get("use_ml_model", True),
+        tooltip="Use the trained machine learning model for classification"
+    )
+    
+    # Thresholds
+    ml_threshold_slider = ft.Slider(
+        min=0.0,
+        max=1.0,
+        divisions=100,
+        value=filter_config.get("ml_threshold", 0.85),
+        label="ML Threshold: {value}",
+        width=300
+    )
+    
+    ml_threshold_text = ft.Text(
+        f"ML Threshold: {filter_config.get('ml_threshold', 0.85):.2f}",
+        size=12,
+        color="grey"
+    )
+    
+    suspicious_tld_threshold_slider = ft.Slider(
+        min=0.0,
+        max=1.0,
+        divisions=100,
+        value=filter_config.get("suspicious_tld_threshold", 0.6),
+        label="Suspicious TLD Threshold: {value}",
+        width=300
+    )
+    
+    suspicious_tld_threshold_text = ft.Text(
+        f"Suspicious TLD Threshold: {filter_config.get('suspicious_tld_threshold', 0.6):.2f}",
+        size=12,
+        color="grey"
+    )
+    
+    def on_ml_threshold_change(e):
+        ml_threshold_text.value = f"ML Threshold: {e.control.value:.2f}"
+        page.update()
+    
+    def on_suspicious_tld_threshold_change(e):
+        suspicious_tld_threshold_text.value = f"Suspicious TLD Threshold: {e.control.value:.2f}"
+        page.update()
+    
+    ml_threshold_slider.on_change = on_ml_threshold_change
+    suspicious_tld_threshold_slider.on_change = on_suspicious_tld_threshold_change
+    
+    settings_status = ft.Text("", size=12)
+    
+    def save_settings(e):
+        # Update config with all methods
+        new_config = {
+            # Core methods
+            "use_whitelist": use_whitelist_check.value,
+            "use_manual_list": use_manual_list_check.value,
+            
+            # Heuristic methods
+            "use_ip_check": use_ip_check.value,
+            "use_punycode_check": use_punycode_check.value,
+            "use_excessive_hyphens": use_excessive_hyphens.value,
+            "use_long_label": use_long_label.value,
+            "use_hex_string": use_hex_string.value,
+            "use_suspicious_tld": use_suspicious_tld.value,
+            "use_dga_pattern": use_dga_pattern.value,
+            
+            # ML method
+            "use_ml_model": use_ml_model_check.value,
+            
+            # Thresholds
+            "ml_threshold": ml_threshold_slider.value,
+            "suspicious_tld_threshold": suspicious_tld_threshold_slider.value
+        }
+        
+        save_filter_config(new_config)
+        
+        settings_status.value = "✓ Settings saved successfully! Restart filter for changes to take effect."
+        settings_status.color = "green"
+        
+        enabled_count = sum(1 for k, v in new_config.items() if k.startswith('use_') and v)
+        add_log_to_ui(f"✓ Filter settings updated ({enabled_count} methods enabled)")
+        
+        page.update()
+    
+    settings_tab = ft.Container(
+        content=ft.Column([
+            ft.Text("Filter Settings", size=20, weight=ft.FontWeight.BOLD),
+            ft.Container(height=20),
+            
+            # Core Methods Section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SHIELD, size=24, color="blue"),
+                        ft.Text("Core Methods", size=16, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(),
+                    use_whitelist_check,
+                    use_manual_list_check,
+                ]),
+                bgcolor="#2C2C2C",
+                padding=15,
+                border_radius=10,
+                width=700
+            ),
+            
+            ft.Container(height=15),
+            
+            # Heuristic Methods Section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.PATTERN, size=24, color="orange"),
+                        ft.Text("Heuristic Detection Methods", size=16, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(),
+                    ft.Text(
+                        "Pattern-based detection for known malicious characteristics",
+                        size=11,
+                        color="grey"
+                    ),
+                    ft.Container(height=10),
+                    
+                    ft.Row([
+                        ft.Column([
+                            use_ip_check,
+                            use_punycode_check,
+                            use_excessive_hyphens,
+                        ], spacing=5),
+                        ft.Column([
+                            use_long_label,
+                            use_hex_string,
+                            use_dga_pattern,
+                        ], spacing=5),
+                        ft.Column([
+                            use_suspicious_tld,
+                        ], spacing=5),
+                    ], spacing=30)
+                ]),
+                bgcolor="#2C2C2C",
+                padding=15,
+                border_radius=10,
+                width=700
+            ),
+            
+            ft.Container(height=15),
+            
+            # ML Method Section
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.PSYCHOLOGY, size=24, color="green"),
+                        ft.Text("Machine Learning", size=16, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    ft.Divider(),
+                    use_ml_model_check,
+                    
+                    ft.Container(height=15),
+                    ft.Divider(),
+                    
+                    ft.Text("ML Model Threshold", size=14, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        "Domains with scores above this threshold will be blocked",
+                        size=11,
+                        color="grey"
+                    ),
+                    ft.Container(height=5),
+                    ml_threshold_slider,
+                    ml_threshold_text,
+                    
+                    ft.Container(height=15),
+                    
+                    ft.Text("Suspicious TLD Threshold", size=14, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        "Lower threshold for domains with suspicious TLDs (.tk, .ml, etc.)",
+                        size=11,
+                        color="grey"
+                    ),
+                    ft.Container(height=5),
+                    suspicious_tld_threshold_slider,
+                    suspicious_tld_threshold_text,
+                ]),
+                bgcolor="#2C2C2C",
+                padding=15,
+                border_radius=10,
+                width=700
+            ),
+            
+            ft.Container(height=20),
+            
+            ft.ElevatedButton(
+                "Save Settings",
+                icon=ft.Icons.SAVE,
+                on_click=save_settings,
+                width=200,
+                height=45
+            ),
+            settings_status,
+            
+            ft.Container(height=15),
+            
+            ft.Container(
+                content=ft.Column([
+                    ft.Icon(ft.Icons.INFO_OUTLINE, color="blue", size=24),
+                    ft.Text(
+                        "Note: Settings are saved immediately but require restarting the filter to take effect.",
+                        size=11,
+                        color="grey",
+                        text_align=ft.TextAlign.CENTER
+                    )
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                bgcolor="#2C2C2C",
+                padding=15,
+                border_radius=10,
+                width=700
+            )
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, scroll="auto"),
         padding=20,
         expand=True
     )
@@ -530,8 +1063,8 @@ def main(page: ft.Page):
                 content=logs_tab
             ),
             ft.Tab(
-                text="Domains",
-                icon=ft.Icons.LANGUAGE,
+                text="Blocklist",
+                icon=ft.Icons.BLOCK,
                 content=domain_tab
             ),
             ft.Tab(
@@ -540,9 +1073,19 @@ def main(page: ft.Page):
                 content=ip_tab
             ),
             ft.Tab(
+                text="Whitelist",
+                icon=ft.Icons.CHECK_CIRCLE,
+                content=whitelist_tab
+            ),
+            ft.Tab(
                 text="Updates",
                 icon=ft.Icons.SYSTEM_UPDATE,
                 content=updates_tab
+            ),
+            ft.Tab(
+                text="Settings",
+                icon=ft.Icons.TUNE,
+                content=settings_tab
             )
         ],
         expand=True

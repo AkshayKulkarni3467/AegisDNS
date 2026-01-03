@@ -504,7 +504,7 @@ def save_feed_snapshot(benign_list, malicious_list):
     logger.info(f"Saved feed snapshot — benign: {benign_path}, malicious: {malicious_path}")
 
 
-def train_base_model(epochs=50, batch_size=64, learning_rate=0.001):
+def train_base_model(epochs=15, batch_size=64, learning_rate=0.001):
     """Train the base DNS security model (full training, no LoRA)"""
     logger.info("=" * 60)
     logger.info("TRAINING BASE MODEL (Full Parameters)")
@@ -569,7 +569,7 @@ def train_base_model(epochs=50, batch_size=64, learning_rate=0.001):
     
     best_f1 = 0
     patience_counter = 0
-    max_patience = 30
+    max_patience = 5
     
     # Store metrics history per epoch
     epoch_history = []
@@ -754,7 +754,7 @@ def train_base_model(epochs=50, batch_size=64, learning_rate=0.001):
     
     return model, feature_extractor
 
-def incremental_update(epochs=20, batch_size=64, learning_rate=0.0001, 
+def incremental_update(epochs=5, batch_size=64, learning_rate=0.0001, 
                        lora_r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT):
     """
     Incremental update using LoRA - ONLY trains on NEW domains
